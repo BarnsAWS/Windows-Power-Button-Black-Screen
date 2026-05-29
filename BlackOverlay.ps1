@@ -2,14 +2,14 @@
 .SYNOPSIS
     Per-user black-overlay daemon. When the display state goes Off (e.g. the
     laptop power button is pressed and powercfg routes that to "Turn off the
-    display"), paints a topmost click-through black window on every monitor so
-    the desktop reads as fully blank. Does NOT lock the session, so unattended
-    automation (Amazon Quick CUA, etc.) can keep driving browser windows
-    underneath.
+    display"), or when the user presses the arm hotkey, paints a topmost
+    click-through black window on every monitor so the desktop reads as fully
+    blank. Does NOT lock the session, so unattended automation (Amazon Quick
+    CUA, etc.) can keep driving browser windows underneath.
 
 .DESCRIPTION
-    Runs in the user's logon session. Builds a hidden message window to receive
-    power-broadcast notifications. Subscribes to GUID_CONSOLE_DISPLAY_STATE.
+    Runs in the user's logon session. Builds a hidden message window to
+    receive notifications. Subscribes to GUID_CONSOLE_DISPLAY_STATE.
 
       data = 0x0  -> display Off  -> ARM overlay (one black window per monitor)
       data = 0x1  -> display On   -> if armed, keep overlay up
@@ -20,22 +20,27 @@
     WS_EX_NOACTIVATE. Click-through means synthesized input from CUA tools
     (mouse_event / SendInput / browser DevTools) lands on the windows below.
 
-    Two hotkeys are registered with RegisterHotKey (low-level, fires even if
-    the foreground app is full-screen):
+    Hotkeys via RegisterHotKey:
 
-      DISMISS  Ctrl+Alt+Shift+End  -> hide overlays, disarm.
-      ARM      Ctrl+Alt+Shift+B    -> manually arm without pressing the power
-                                      button. Also re-arms if the user moved
-                                      the mouse and the display turned back on.
+      Win+Shift+L            -> arm overlay (closest-to-Win+L combo that
+                                Winlogon does not reserve; works without
+                                touching any policy)
+      Ctrl+Alt+Shift+L       -> arm overlay (alternate; works even if a GPO
+                                takes Win-modifier hotkeys away from the user)
+      Ctrl+Alt+Shift+End     -> dismiss overlay
+      Ctrl+Alt+Shift+B       -> manually arm
 
-    Designed to be installed by INSTALL.ps1 as a per-user logon Scheduled Task
-    so it starts at sign-in and survives the screen saver or display-off cycle.
-    The script is fully self-contained: no external assemblies beyond the .NET
-    Framework that ships with Windows 10/11.
+    Win+L itself is reserved by Winlogon and cannot be intercepted by user-
+    mode RegisterHotKey calls. Disabling Winlogon's interception requires
+    HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\System
+    \DisableLockWorkstation = 1, which enterprise GPOs commonly forbid. Rather
+    than fight the GPO, we use the hotkey one shift away.
+
+    Designed to be installed by INSTALL.ps1 as a per-user logon Scheduled Task.
 
 .NOTES
-    PInvoke is done through Add-Type. The script targets PowerShell 5.1 (the
-    in-box Windows PowerShell) so it runs without installing PowerShell 7.
+    PowerShell 5.1, .NET Framework Forms, PInvoke against user32.dll. No
+    third-party dependencies, no service, no kernel driver.
 
 .PARAMETER LogPath
     Optional. Append-only log file. Defaults to
@@ -95,16 +100,11 @@ public static class Native {
     public const int WM_HOTKEY           = 0x0312;
     public const int PBT_POWERSETTINGCHANGE = 0x8013;
 
-    public const int WS_POPUP            = unchecked((int)0x80000000);
-    public const int WS_VISIBLE          = 0x10000000;
-
     public const int WS_EX_TOPMOST       = 0x00000008;
     public const int WS_EX_TOOLWINDOW    = 0x00000080;
     public const int WS_EX_LAYERED       = 0x00080000;
     public const int WS_EX_TRANSPARENT   = 0x00000020;
     public const int WS_EX_NOACTIVATE    = 0x08000000;
-
-    public const int LWA_ALPHA           = 0x00000002;
 
     public const int DEVICE_NOTIFY_WINDOW_HANDLE = 0;
 
@@ -130,13 +130,61 @@ public static class Native {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
-    public const uint MOD_ALT     = 0x0001;
-    public const uint MOD_CONTROL = 0x0002;
-    public const uint MOD_SHIFT   = 0x0004;
+    // ----------------------------------------------------------------------
+    // GPO-bypass surface
+    //
+    // GPO/MDM-managed boxes push a secure screen saver via
+    // HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop with
+    // ScreenSaverIsSecure=1 and a short timeout. That registry path is
+    // re-applied on every policy refresh, so user-mode cannot keep the
+    // value cleared.
+    //
+    // Two APIs neutralise the lock without writing to any policy path:
+    //
+    //   SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE, ...)
+    //     Disables the running-session screen-saver dispatch in user32.
+    //     The registry policy is unchanged; it just does not fire while
+    //     we hold the dispatch off. Must be re-applied periodically in
+    //     case a policy refresh re-arms the running-session state.
+    //
+    //   SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED)
+    //     Tells Windows the user is present, so the input-idle counter
+    //     never satisfies the screen-saver predicate. Belt-and-suspenders
+    //     to SPI_SETSCREENSAVEACTIVE. Held only while the overlay is
+    //     armed; cleared on dismiss so sleep still works normally when
+    //     the overlay is down.
+    // ----------------------------------------------------------------------
+
+    public const uint SPI_SETSCREENSAVEACTIVE = 0x0011;
+    public const uint SPI_GETSCREENSAVEACTIVE = 0x0010;
+    public const uint SPIF_SENDCHANGE         = 0x02;
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SystemParametersInfoW", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfoBool(uint uiAction, uint uiParam, ref bool pvParam, uint fWinIni);
+
+    [Flags]
+    public enum EXECUTION_STATE : uint {
+        ES_AWAYMODE_REQUIRED = 0x00000040,
+        ES_CONTINUOUS        = 0x80000000,
+        ES_DISPLAY_REQUIRED  = 0x00000002,
+        ES_SYSTEM_REQUIRED   = 0x00000001
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern EXECUTION_STATE SetThreadExecutionState(EXECUTION_STATE esFlags);
+
+    public const uint MOD_ALT      = 0x0001;
+    public const uint MOD_CONTROL  = 0x0002;
+    public const uint MOD_SHIFT    = 0x0004;
+    public const uint MOD_WIN      = 0x0008;
     public const uint MOD_NOREPEAT = 0x4000;
 
     public const uint VK_END = 0x23;
     public const uint VK_B   = 0x42;
+    public const uint VK_L   = 0x4C;
 }
 
 // Hidden message-only window that the PowerShell host can subscribe to.
@@ -231,6 +279,9 @@ function Show-Overlays {
     } else {
         $script:Armed = $true
         Write-Log "Arming overlays."
+        # Belt: re-suppress the screen saver right now in case the 60s
+        # timer just ticked and a policy refresh re-armed the dispatch.
+        [void](Suppress-ScreenSaver)
     }
 
     $current = @{}
@@ -257,31 +308,169 @@ function Hide-Overlays {
         try { $f.Close(); $f.Dispose() } catch {}
     }
     $script:Overlays.Clear()
+    # Idle keepalive stays ON across overlay arm/dismiss cycles. The
+    # daemon's job is "session never auto-locks while I am running" and
+    # that contract has to hold whether the overlay is currently up or
+    # not. Released in the daemon's finally block.
 }
 
 # ---------------------------------------------------------------------------
-# Wire up
+# GPO-bypass: keep the running-session screen saver suppressed and pin the
+# user-presence idle counter while overlays are armed.
+#
+# Why this exists: corporate-managed laptops push
+# HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop\
+# ScreenSaverIsSecure = 1 with a short ScreenSaveTimeOut. That policy path
+# survives any user-mode delete (it gets re-applied on policy refresh, every
+# 90 minutes give-or-take). The trick is to operate one layer above the
+# registry, on the running session itself, where user32 holds a separate
+# dispatch state that the policy machinery does not touch. See
+# INVESTIGATION-2026-05-29.md for the full root-cause writeup.
 # ---------------------------------------------------------------------------
+
+function Suppress-ScreenSaver {
+    # SPI_SETSCREENSAVEACTIVE = FALSE in the running session. On
+    # GPO-locked boxes this call is often blocked (returns FALSE with
+    # ERROR_ACCESS_DENIED 0x5). We log the result and keep going; the
+    # ES_DISPLAY_REQUIRED keepalive below handles the lock-prevention
+    # job on its own when SPI is denied.
+    $ok = [Native]::SystemParametersInfo(
+        [Native]::SPI_SETSCREENSAVEACTIVE,
+        0,
+        [IntPtr]::Zero,
+        [Native]::SPIF_SENDCHANGE)
+    if (-not $ok) {
+        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        return @{ ok = $false; error = $err }
+    }
+    return @{ ok = $true; error = 0 }
+}
+
+function Get-ScreenSaverActive {
+    $val = $false
+    [Native]::SystemParametersInfoBool(
+        [Native]::SPI_GETSCREENSAVEACTIVE,
+        0,
+        [ref]$val,
+        0) | Out-Null
+    return $val
+}
+
+function Hold-IdleKeepalive {
+    # ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED tells
+    # Windows the user is present so the input-idle counter never expires
+    # and the system never auto-sleeps. This is THE mechanism Windows uses
+    # to decide whether to launch the screen saver: if any thread holds
+    # ES_DISPLAY_REQUIRED, the saver does not activate. That makes the
+    # daemon GPO-proof against secure-screensaver auto-lock on managed
+    # corporate boxes where SPI_SETSCREENSAVEACTIVE is denied.
+    #
+    # ES_AWAYMODE_REQUIRED is the additional flag for laptops with
+    # connected standby / Modern Standby (S0ix). Without it, pressing the
+    # power button on such a laptop causes the firmware to blank the
+    # panel AND Windows to drop the whole system into S0ix to save
+    # power, even though "Turn off the display" is selected. While in
+    # S0ix the daemon's message pump is not running so the overlay
+    # cannot paint until the system wakes. With ES_AWAYMODE_REQUIRED the
+    # system stays at full S0 (display off, CPU and IO live), which is
+    # exactly the contract of this daemon.
+    #
+    # Held continuously while the daemon runs, regardless of overlay
+    # state. Released only in the daemon's finally block.
+    $flags = [Native+EXECUTION_STATE]::ES_CONTINUOUS -bor `
+             [Native+EXECUTION_STATE]::ES_DISPLAY_REQUIRED -bor `
+             [Native+EXECUTION_STATE]::ES_SYSTEM_REQUIRED -bor `
+             [Native+EXECUTION_STATE]::ES_AWAYMODE_REQUIRED
+    $prev = [Native]::SetThreadExecutionState($flags)
+    Write-Log ("Idle keepalive ON (prev=0x{0:x8}, flags=0x{1:x8})." -f [uint32]$prev, [uint32]$flags)
+}
+
+function Release-IdleKeepalive {
+    # Drop the keepalive on shutdown. ES_CONTINUOUS alone clears prior
+    # flags so the system can sleep / dim normally once the daemon exits.
+    $prev = [Native]::SetThreadExecutionState([Native+EXECUTION_STATE]::ES_CONTINUOUS)
+    Write-Log ("Idle keepalive OFF (prev=0x{0:x8})." -f [uint32]$prev)
+}
+
+# Hold the idle keepalive for the entire daemon lifetime. Ungated by
+# overlay state because the no-auto-lock contract holds always.
+Hold-IdleKeepalive
+
+# Apply SPI suppression at startup as a best effort. On GPO-locked boxes
+# this fails; the keepalive above is the actual fix.
+$initialActive = Get-ScreenSaverActive
+$r = Suppress-ScreenSaver
+if ($r.ok) {
+    Write-Log ("SPI_SETSCREENSAVEACTIVE applied at startup (was={0})." -f $initialActive)
+} else {
+    Write-Log ("SPI_SETSCREENSAVEACTIVE blocked at startup (Win32Error=0x{0:x}, was={1}). Relying on ES_DISPLAY_REQUIRED keepalive." -f $r.error, $initialActive)
+}
+
+# Probe the policy path so the log proves whether GPO is pushing the lock.
+try {
+    $polPath = 'HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop'
+    if (Test-Path $polPath) {
+        $pol = Get-ItemProperty -Path $polPath -ErrorAction SilentlyContinue
+        $pSecure  = if ($pol.PSObject.Properties.Name -contains 'ScreenSaverIsSecure') { $pol.ScreenSaverIsSecure } else { 'unset' }
+        $pActive  = if ($pol.PSObject.Properties.Name -contains 'ScreenSaveActive')    { $pol.ScreenSaveActive }    else { 'unset' }
+        $pTimeout = if ($pol.PSObject.Properties.Name -contains 'ScreenSaveTimeOut')   { $pol.ScreenSaveTimeOut }   else { 'unset' }
+        Write-Log "GPO policy path present: ScreenSaverIsSecure=$pSecure ScreenSaveActive=$pActive ScreenSaveTimeOut=$pTimeout."
+    } else {
+        Write-Log "GPO policy path absent (no Software\Policies\...\Control Panel\Desktop)."
+    }
+} catch {
+    Write-Log ("GPO probe failed: {0}" -f $_.Exception.Message)
+}
+
+# Re-apply ES keepalive every 60 seconds. SetThreadExecutionState is
+# scoped to the calling thread; in a Forms app on the message-pump
+# thread the flag survives indefinitely, but re-applying is cheap
+# insurance against any path that might clear it (RDP reconnect, fast
+# user switch, ill-behaved background COM call). Also re-attempts SPI
+# in case the GPO restriction is lifted for any reason.
+$keepaliveTimer = New-Object System.Windows.Forms.Timer
+$keepaliveTimer.Interval = 60000
+$keepaliveTimer.add_Tick({
+    # Re-apply ES (idempotent; cheap).
+    $flags = [Native+EXECUTION_STATE]::ES_CONTINUOUS -bor `
+             [Native+EXECUTION_STATE]::ES_DISPLAY_REQUIRED -bor `
+             [Native+EXECUTION_STATE]::ES_SYSTEM_REQUIRED -bor `
+             [Native+EXECUTION_STATE]::ES_AWAYMODE_REQUIRED
+    [void][Native]::SetThreadExecutionState($flags)
+
+    # Best-effort SPI re-suppression. Only log when state changes to keep
+    # the log readable.
+    $beforeActive = Get-ScreenSaverActive
+    [void](Suppress-ScreenSaver)
+    if ($beforeActive) {
+        Write-Log "Re-suppressed running-session screen saver (was active again; SPI may have been re-armed by policy refresh)."
+    }
+})
+$keepaliveTimer.Start()
 
 $msg = New-Object MessageWindow
 
 # Hotkey IDs
-$HK_DISMISS = 1
-$HK_ARM     = 2
+$HK_DISMISS     = 1
+$HK_ARM         = 2
+$HK_WIN_SHIFT_L = 3
+$HK_TRIPLE_L    = 4
 
-# DISMISS = Ctrl+Alt+Shift+End
-[Native]::RegisterHotKey(
-    $msg.Handle,
-    $HK_DISMISS,
-    ([Native]::MOD_CONTROL -bor [Native]::MOD_ALT -bor [Native]::MOD_SHIFT -bor [Native]::MOD_NOREPEAT),
-    [Native]::VK_END) | Out-Null
+$tripleMod   = ([Native]::MOD_CONTROL -bor [Native]::MOD_ALT -bor [Native]::MOD_SHIFT -bor [Native]::MOD_NOREPEAT)
+$winShiftMod = ([Native]::MOD_WIN -bor [Native]::MOD_SHIFT -bor [Native]::MOD_NOREPEAT)
 
-# ARM = Ctrl+Alt+Shift+B
-[Native]::RegisterHotKey(
-    $msg.Handle,
-    $HK_ARM,
-    ([Native]::MOD_CONTROL -bor [Native]::MOD_ALT -bor [Native]::MOD_SHIFT -bor [Native]::MOD_NOREPEAT),
-    [Native]::VK_B) | Out-Null
+[Native]::RegisterHotKey($msg.Handle, $HK_DISMISS, $tripleMod, [Native]::VK_END) | Out-Null
+[Native]::RegisterHotKey($msg.Handle, $HK_ARM,     $tripleMod, [Native]::VK_B)   | Out-Null
+
+# Win+Shift+L is the closest-to-Win+L combo that is not reserved by Winlogon.
+# Some enterprise GPOs disable Win-modifier hotkeys for the user; if that
+# happens, the second registration covers the same gesture without the Win key.
+$ok1 = [Native]::RegisterHotKey($msg.Handle, $HK_WIN_SHIFT_L, $winShiftMod, [Native]::VK_L)
+$ok2 = [Native]::RegisterHotKey($msg.Handle, $HK_TRIPLE_L,    $tripleMod,   [Native]::VK_L)
+if ($ok1) { Write-Log "Win+Shift+L registered as overlay arm." }
+else      { Write-Log "Win+Shift+L registration failed (likely GPO). Falling back to Ctrl+Alt+Shift+L only." }
+if ($ok2) { Write-Log "Ctrl+Alt+Shift+L registered as overlay arm." }
+else      { Write-Log "Ctrl+Alt+Shift+L registration failed (unexpected)." }
 
 $msg.add_DisplayStateChanged({
     param($subtype, $data)
@@ -295,8 +484,10 @@ $msg.add_DisplayStateChanged({
 $msg.add_HotkeyPressed({
     param($id)
     switch ($id) {
-        1 { Write-Log "Hotkey: DISMISS";  Hide-Overlays }
-        2 { Write-Log "Hotkey: MANUAL ARM"; Show-Overlays }
+        1 { Write-Log "Hotkey: DISMISS";          Hide-Overlays }
+        2 { Write-Log "Hotkey: MANUAL ARM";       Show-Overlays }
+        3 { Write-Log "Hotkey: WIN+SHIFT+L";      Show-Overlays }
+        4 { Write-Log "Hotkey: CTRL+ALT+SHIFT+L"; Show-Overlays }
     }
 })
 
@@ -311,8 +502,12 @@ try {
     [System.Windows.Forms.Application]::Run()
 } finally {
     Write-Log "Shutting down."
-    [Native]::UnregisterHotKey($msg.Handle, $HK_DISMISS) | Out-Null
-    [Native]::UnregisterHotKey($msg.Handle, $HK_ARM)     | Out-Null
+    [Native]::UnregisterHotKey($msg.Handle, $HK_DISMISS)     | Out-Null
+    [Native]::UnregisterHotKey($msg.Handle, $HK_ARM)         | Out-Null
+    [Native]::UnregisterHotKey($msg.Handle, $HK_WIN_SHIFT_L) | Out-Null
+    [Native]::UnregisterHotKey($msg.Handle, $HK_TRIPLE_L)    | Out-Null
+    if ($keepaliveTimer) { $keepaliveTimer.Stop(); $keepaliveTimer.Dispose() }
+    Release-IdleKeepalive
     Hide-Overlays
     $msg.Shutdown()
     $mutex.ReleaseMutex()

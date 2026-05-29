@@ -91,10 +91,13 @@ From a normal (non-elevated) PowerShell prompt in the cloned repo:
 
 What this does:
 
-1. Sets `Power button -> Turn off the display` on AC and battery (`powercfg`).
-2. Copies `BlackOverlay.ps1` to `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.ps1`.
-3. Registers a per-user Scheduled Task `BlackOverlayDaemon` that runs at logon under your user account with `-WindowStyle Hidden`.
-4. Starts the task immediately.
+1. Sets `Power button -> Turn off the display` on AC and battery (`powercfg`). On Modern Standby (S0ix) hardware the power button is instead set to `Do nothing` so the firmware does not drop the system into connected standby; on those machines, use a hotkey (see below).
+2. Disables the secure screen saver (`ScreenSaverIsSecure=0`, `ScreenSaveActive=0`) and Dynamic Lock (`EnableGoodbye=0`) so nothing auto-locks the session after the display turns off. See [Why the lock-guard?](#why-the-lock-guard) below.
+3. Copies `BlackOverlay.ps1` to `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.ps1`.
+4. Registers a per-user Scheduled Task `BlackOverlayDaemon` that runs at logon under your user account with `-WindowStyle Hidden`.
+5. Starts the task immediately.
+
+The daemon also holds `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` for its entire lifetime. This is the GPO bypass: corporate-managed laptops push `ScreenSaverIsSecure=1` to the policy registry path, which user-mode cannot clear durably. But the screen-saver activation predicate Windows uses is *"any thread holding `ES_DISPLAY_REQUIRED`"*, and that operates on the running session, not the registry. The daemon holding the flag means the saver never fires regardless of policy. See [GPO bypass](#gpo-bypass) below for the full mechanism.
 
 To install the daemon without touching `powercfg`:
 
@@ -104,14 +107,87 @@ To install the daemon without touching `powercfg`:
 
 Useful if you want the manual hotkey only and prefer not to repurpose the power button.
 
+To install without disabling the secure screen saver / Dynamic Lock:
+
+```powershell
+.\INSTALL.ps1 -SkipLockGuard
+```
+
+Use only if you intentionally want lock-on-idle to stay on. Default behaviour clears it because lock-on-idle defeats the whole point of this daemon (the session must stay unlocked).
+
+### Why the lock-guard?
+
+If you previously installed the sibling repo [Windows-Power-Button-Lock-Without-Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep), it set:
+
+- `HKCU:\Control Panel\Desktop\ScreenSaverIsSecure = 1`
+- `HKCU:\Control Panel\Desktop\ScreenSaveActive = 1`
+- `HKCU:\Control Panel\Desktop\ScreenSaveTimeOut = 180` (or whatever you passed)
+
+That state survives uninstalls of *that* repo's `UNINSTALL.ps1` only partially — and even on a clean Windows install, an enterprise GPO can flip these on. With those values active and this repo's daemon running, the flow is:
+
+1. Power button pressed → display off → overlay armed (correct).
+2. 180 seconds later Windows counts the user as idle → secure screen saver fires → **session locks**.
+
+The lock-guard step in step 2 of the installer clears those values up front so the two repos cannot fight on the same box and so a stale screen-saver setting never quietly re-locks the session.
+
+## GPO bypass
+
+On a corporate-managed laptop the v1.1 lock-guard is necessary but not sufficient. Intune / GPO pushes the same screen-saver values to a *different* registry path that the policy engine owns:
+
+```
+HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop\
+    ScreenSaverIsSecure = 1
+    ScreenSaveActive    = 1
+    ScreenSaveTimeOut   = 900    (typically 15 min)
+```
+
+Windows reads the policy path ahead of the user-scope path. User-mode code cannot clear policy values durably; they are re-applied on every policy refresh (about every 90 minutes). Same for the `SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE)` API call: on managed boxes it returns FALSE with `Win32Error=0x4ec` (`ERROR_NOT_FOR_YOU_TO_PROCESS`).
+
+The right answer is to operate one layer above the registry, on the *running session itself*. Windows decides whether to launch the screen saver by checking whether any thread is holding `ES_DISPLAY_REQUIRED` via `SetThreadExecutionState`. If the daemon holds it, the saver does not fire — regardless of registry, policy, or anything else. This is the same mechanism PowerPoint, Teams, and OBS use to keep the display alive during presentations.
+
+The daemon holds:
+
+```
+ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+```
+
+continuously for its entire lifetime. Released only when the daemon shuts down (the `finally` block of the message loop). The flags mean:
+
+| Flag | Effect |
+|---|---|
+| `ES_CONTINUOUS` | Persist these flags until cleared, instead of one-shot |
+| `ES_DISPLAY_REQUIRED` | Suppresses screen-saver activation and display-off idle timeout |
+| `ES_SYSTEM_REQUIRED` | Suppresses sleep on idle |
+| `ES_AWAYMODE_REQUIRED` | On Modern Standby (S0ix) hardware, prevents the system from dropping into connected standby |
+
+The daemon also calls `SystemParametersInfo(SPI_SETSCREENSAVEACTIVE, FALSE)` at startup and every 60 seconds as a best effort. On unmanaged machines that succeeds and is a belt-and-suspenders win. On GPO-locked machines it is denied; the log records the failure and the `ES_*` keepalive does the actual work.
+
+The daemon log makes the GPO state explicit at startup, so future investigations have evidence:
+
+```
+Idle keepalive ON (prev=0x80000000, flags=0x80000043).
+SPI_SETSCREENSAVEACTIVE blocked at startup (Win32Error=0x4ec, was=False). Relying on ES_DISPLAY_REQUIRED keepalive.
+GPO policy path present: ScreenSaverIsSecure=1 ScreenSaveActive=1 ScreenSaveTimeOut=900.
+```
+
+## Modern Standby (S0ix) hardware
+
+Some laptops (most modern ARM and many Intel Tiger Lake+ devices) only support `Standby (S0 Low Power Idle) Network Connected` — confirm with `powercfg /a`. On those machines, mapping the power button to "Turn off the display" causes the firmware to drop the *entire system* into S0ix to save power, parking every user-mode message pump including the daemon's. The overlay cannot paint until the system wakes, which defeats the muscle-memory the daemon is supposed to support.
+
+The installer probes for Modern Standby and on those machines maps the power button to **`Do nothing`** instead. Use `Win+Shift+L`, `Ctrl+Alt+Shift+L`, or `Ctrl+Alt+Shift+B` to arm the overlay. The daemon paints overlays before any firmware-blank happens, so this path is fully reliable on Modern Standby hardware.
+
+The reason this cannot be fixed at the daemon layer alone is that `SetThreadExecutionState(ES_AWAYMODE_REQUIRED)` only blocks *idle-driven* connected standby entry. Power-button-driven entry on Modern Standby goes through a different kernel path that does not consult execution-state flags. Disabling Connected Standby system-wide via `HKLM:\System\CurrentControlSet\Control\Power\CsEnabled = 0` would also fix it but requires admin and a reboot, which is out of scope for a per-user daemon.
+
 ## Use
 
 | Action | How |
 |---|---|
-| Arm overlay (auto) | Press the laptop power button. |
-| Arm overlay (manual) | `Ctrl+Alt+Shift+B` |
+| Arm overlay (auto, S3 hardware) | Press the laptop power button. |
+| Arm overlay (manual) | `Ctrl+Alt+Shift+B`, `Win+Shift+L`, or `Ctrl+Alt+Shift+L` |
 | Dismiss overlay | `Ctrl+Alt+Shift+End` |
-| Wake screen without dismissing | Move the mouse or press a key — display wakes, overlay stays. |
+| Wake screen without dismissing | Move the mouse or press a key. Display wakes, overlay stays. |
+
+On Modern Standby (S0ix) laptops the power button is intentionally mapped to `Do nothing` (see [Modern Standby (S0ix) hardware](#modern-standby-s0ix-hardware) above), so use a hotkey to arm. The daemon paints the overlay before any firmware-blank request goes out, which is fully reliable.
 
 The daemon is stateful: the overlay stays armed across display-off / display-on cycles. Walking back to the desk, jiggling the mouse, looking at the keyboard — none of those dismiss it. Only the dismiss hotkey or `UNINSTALL.ps1` does.
 
@@ -132,9 +208,9 @@ Get-Content "$env:LOCALAPPDATA\BlackOverlay\BlackOverlay.log" -Tail 30
 
 Expected:
 
-- Power button index `0x00000004` on AC and DC.
+- Power button index `0x00000004` on AC and DC (S3 laptops) or `0x00000000` (`Do nothing`, on Modern Standby laptops).
 - Scheduled task state `Running`.
-- The log shows `BlackOverlay starting`, then a `Listening for power-broadcast and hotkeys` line.
+- The log shows `BlackOverlay starting`, then `Idle keepalive ON`, then a `Listening for power-broadcast and hotkeys` line.
 
 Smoke test:
 
@@ -164,19 +240,23 @@ The deciding question is always **does the tool look at the screen, or does it t
 
 | Setting | Where | After install |
 |---|---|---|
-| Power button (AC + DC) | `powercfg SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION` | `Turn off the display` (index 4) |
+| Power button (AC + DC) | `powercfg SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION` | `Turn off the display` (index 4) on S3 hardware, or `Do nothing` (index 0) on Modern Standby hardware |
+| Secure screen saver | `HKCU:\Control Panel\Desktop\ScreenSaverIsSecure` | `0` (cleared by lock-guard; skip with `-SkipLockGuard`) |
+| Auto screen saver | `HKCU:\Control Panel\Desktop\ScreenSaveActive` | `0` (cleared by lock-guard; skip with `-SkipLockGuard`) |
+| Dynamic Lock | `HKCU:\...\Winlogon\EnableGoodbye` | `0` if previously set (cleared by lock-guard) |
+| Running-session screen saver | `SystemParametersInfo(SPI_SETSCREENSAVEACTIVE)` | Best-effort `FALSE` at startup and every 60s. Denied on GPO-locked boxes; the ES keepalive picks up the slack. |
+| Thread execution state | `SetThreadExecutionState` (held by daemon thread) | `ES_CONTINUOUS \| ES_DISPLAY_REQUIRED \| ES_SYSTEM_REQUIRED \| ES_AWAYMODE_REQUIRED`. This is the GPO bypass. |
 | Daemon script | `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.ps1` | Copied from the repo |
 | Daemon log | `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.log` | Created on first run, append-only |
 | Scheduled Task | `\BlackOverlayDaemon` (Task Scheduler library) | At-logon, current user, `-WindowStyle Hidden`, runs forever |
 
 The install does **not** touch:
 
-- Screen saver (`HKCU:\Control Panel\Desktop`).
 - Sleep timeouts (`powercfg standby-timeout-*`).
-- Dynamic Lock (`EnableGoodbye`).
 - Lid-close action.
+- The `SCRNSAVE.EXE` registry value (only `ScreenSaverIsSecure` and `ScreenSaveActive` are cleared, so your chosen screen saver binary stays selected — it just no longer fires automatically).
 
-If you want the daemon **and** a long-tail real sleep on AC, run [Windows-Power-Button-Lock-Without-Sleep's](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep) `INSTALL.ps1 -SleepACMinutes 360` first, then run this repo's `INSTALL.ps1`. The sleep configuration survives because they touch different registry paths.
+If you want the daemon **and** a long-tail real sleep on AC, run this repo's `INSTALL.ps1` first, then run [Windows-Power-Button-Lock-Without-Sleep's](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep) `INSTALL.ps1 -SleepACMinutes 360 -SkipPowerButton -SkipScreenSaver`. The sleep configuration survives because they touch different registry paths. **Do not** run that repo's installer with the screen-saver step enabled while this daemon is also running — the secure screen saver will lock the session out from under the overlay.
 
 ## Trade-offs and edge cases
 

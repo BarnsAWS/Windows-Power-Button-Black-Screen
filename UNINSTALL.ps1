@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     - Stops and unregisters the BlackOverlayDaemon Scheduled Task.
-    - Removes %LOCALAPPDATA%\BlackOverlay (script, log, mutex bookkeeping).
-    - Restores the power button action to Sleep (the typical Windows default).
+    - Removes %LOCALAPPDATA%\BlackOverlay (script, log).
+    - Restores the power button action to Sleep.
 
     The "Turn off the display" option remains unhidden in Control Panel
     (harmless and arguably useful).
@@ -34,7 +34,6 @@ if ($task) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-# Also kill any orphan daemon processes (the task may have been started manually).
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
     Where-Object { $_.CommandLine -like "*BlackOverlay.ps1*" } |
     ForEach-Object {
