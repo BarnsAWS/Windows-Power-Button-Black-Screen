@@ -191,8 +191,8 @@ If you ever do find your dock wedged after a Modern Standby cycle, the cleanest 
 | Action | How |
 |---|---|
 | Arm overlay (auto, S3 hardware) | Press the laptop power button. |
-| Arm overlay (manual) | `Ctrl+Alt+Shift+B`, `Win+Shift+L`, or `Ctrl+Alt+Shift+L` |
-| Dismiss overlay | `Ctrl+Alt+Shift+End` |
+| Toggle overlay (arm or dismiss) | `Ctrl+Alt+Shift+B`, `Win+Shift+L`, or `Ctrl+Alt+Shift+L` |
+| Dismiss overlay (unconditional) | `Ctrl+Alt+Shift+End` |
 | Wake screen without dismissing | Move the mouse or press a key. Display wakes, overlay stays. |
 
 On Modern Standby (S0ix) laptops the power button is intentionally mapped to `Do nothing` (see [Modern Standby (S0ix) hardware](#modern-standby-s0ix-hardware) above), so use a hotkey to arm. The daemon paints the overlay before any firmware-blank request goes out, which is fully reliable.

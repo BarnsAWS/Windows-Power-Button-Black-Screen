@@ -131,6 +131,26 @@ public static class Native {
     public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    public const uint SWP_NOACTIVATE  = 0x0010;
+    public const uint SWP_NOZORDER    = 0x0004;
+    public const uint SWP_FRAMECHANGED = 0x0020;
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+
+    // Per-monitor DPI awareness. Without this, Screen.AllScreens returns
+    // DPI-scaled bounds (e.g. 2048x1152 for a 2560x1440 monitor at 125%),
+    // and overlays painted to those bounds leave uncovered strips on the
+    // physical display. DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 makes
+    // Screen.Bounds return raw pixels and SetWindowPos use raw pixels.
+    // Available since Windows 10 1607; safe to call at any time as long
+    // as no Forms have been created yet (we call before the first overlay).
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+    public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -240,7 +260,10 @@ public class MessageWindow : NativeWindow {
 
 // One topmost click-through black window per monitor.
 public class OverlayForm : Form {
+    private Rectangle _target;
+
     public OverlayForm(Rectangle bounds) {
+        _target              = bounds;
         this.FormBorderStyle = FormBorderStyle.None;
         this.ShowInTaskbar   = false;
         this.TopMost         = true;
@@ -258,6 +281,10 @@ public class OverlayForm : Form {
                        |  Native.WS_EX_LAYERED
                        |  Native.WS_EX_TRANSPARENT
                        |  Native.WS_EX_NOACTIVATE;
+            cp.X = _target.X;
+            cp.Y = _target.Y;
+            cp.Width  = _target.Width;
+            cp.Height = _target.Height;
             return cp;
         }
     }
@@ -267,18 +294,58 @@ public class OverlayForm : Form {
     // WS_EX_LAYERED windows do not render their BackColor through the
     // normal WinForms paint pipeline. Without an explicit alpha set via
     // SetLayeredWindowAttributes, Windows treats the window as fully
-    // transparent and the BackColor is never composited - the user sees
-    // through to the desktop. Set alpha=255 (opaque) once the handle is
-    // ready so the black BackColor actually paints.
+    // transparent and the BackColor is never composited. Set alpha=255
+    // (opaque) once the handle is ready so the black BackColor paints.
+    //
+    // Also re-apply the bounds via SetWindowPos. WinForms' initial Bounds
+    // setter does not always survive the layered-window CreateWindowEx
+    // path on multi-monitor / per-monitor-DPI systems, so the form can
+    // come up at a wrong size/position even though we set Bounds in the
+    // constructor. SetWindowPos is the authoritative geometry call.
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
         Native.SetLayeredWindowAttributes(this.Handle, 0, 255, Native.LWA_ALPHA);
+        Native.SetWindowPos(
+            this.Handle,
+            Native.HWND_TOPMOST,
+            _target.X, _target.Y, _target.Width, _target.Height,
+            Native.SWP_NOACTIVATE | Native.SWP_FRAMECHANGED);
     }
 }
 '@
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+# ---------------------------------------------------------------------------
+# Per-monitor DPI awareness.
+#
+# Must be set BEFORE any Form is created (otherwise the process is locked
+# in to the original DPI mode for its lifetime). Without this,
+# Screen.AllScreens returns DPI-scaled bounds (e.g. 2048x1152 for a
+# 2560x1440 monitor at 125%), and overlays painted to those bounds only
+# cover a fraction of the physical display - the user sees uncovered
+# strips on the right and bottom of every monitor.
+#
+# DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is the modern context value
+# that handles per-monitor DPI changes correctly (Windows 10 1607+).
+# Falls back gracefully on older Windows: SetProcessDpiAwarenessContext
+# is missing on Win7/8 and the call returns false; the rest of the
+# daemon still works, just at non-DPI-aware bounds.
+# ---------------------------------------------------------------------------
+
+try {
+    $dpiOk = [Native]::SetProcessDpiAwarenessContext(
+        [Native]::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+    if ($dpiOk) {
+        Write-Log "Per-monitor DPI awareness V2 enabled."
+    } else {
+        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-Log ("SetProcessDpiAwarenessContext returned false (Win32Error=0x{0:x}). Continuing." -f $err)
+    }
+} catch {
+    Write-Log ("SetProcessDpiAwarenessContext PInvoke failed: {0}. Likely older Windows; continuing." -f $_.Exception.Message)
+}
 
 # ---------------------------------------------------------------------------
 # Overlay management
@@ -499,13 +566,21 @@ $msg.add_DisplayStateChanged({
     }
 })
 
+function Toggle-Overlays {
+    if ($script:Armed) {
+        Hide-Overlays
+    } else {
+        Show-Overlays
+    }
+}
+
 $msg.add_HotkeyPressed({
     param($id)
     switch ($id) {
         1 { Write-Log "Hotkey: DISMISS";          Hide-Overlays }
-        2 { Write-Log "Hotkey: MANUAL ARM";       Show-Overlays }
-        3 { Write-Log "Hotkey: WIN+SHIFT+L";      Show-Overlays }
-        4 { Write-Log "Hotkey: CTRL+ALT+SHIFT+L"; Show-Overlays }
+        2 { Write-Log "Hotkey: TOGGLE (B)";       Toggle-Overlays }
+        3 { Write-Log "Hotkey: TOGGLE (WIN+SHIFT+L)";      Toggle-Overlays }
+        4 { Write-Log "Hotkey: TOGGLE (CTRL+ALT+SHIFT+L)"; Toggle-Overlays }
     }
 })
 

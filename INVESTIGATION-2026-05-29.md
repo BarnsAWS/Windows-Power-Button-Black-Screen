@@ -456,3 +456,83 @@ powercfg /a
 - Steering file at `~/.kiro/steering/windows-gpo-bypass.md` - new
   section about `WS_EX_LAYERED` requiring layer-attributes
   configuration to actually paint.
+
+
+## Round 8: overlays only covered ~80% of each monitor (v1.6)
+
+After v1.4 (which fixed `WS_EX_LAYERED` painting via
+`SetLayeredWindowAttributes`), the user reported the overlay was still
+not fully covering the monitors - uncovered strips on the right and
+bottom of every display, even though the forms were painting opaque
+black where they did paint.
+
+Diagnostic compared what the daemon logged vs what the screens
+actually were. Daemon log: `Overlay shown on monitor \\.\DISPLAY4 at
+{X=0,Y=0,Width=2048,Height=1152}`. Independent DPI-aware query:
+`DISPLAY4 Bounds={X=0,Y=0,Width=2560,Height=1440}`. The 512px and
+288px strips matched exactly to the DPI scaling factor (125% on
+2560x1440 is 2048x1152 in scaled coordinates).
+
+Root cause: the daemon process was not DPI-aware. PowerShell hosts
+default to System-DPI-Aware on modern Windows, which means
+`Screen.AllScreens` returns DPI-virtualised bounds. Any window
+painted to those bounds only covers the top-left fraction of the
+physical display.
+
+### Fix shipped in v1.6
+
+Three coordinated changes:
+
+1. Call `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
+   immediately after the type definitions load, BEFORE any Form is
+   created. The DPI context is locked in at first window creation, so
+   if any Form is constructed before this call the process is stuck
+   in System-DPI-Aware for its lifetime.
+2. Override `OverlayForm.CreateParams` to also set `cp.X / cp.Y /
+   cp.Width / cp.Height` from a remembered `_target` rect so the form
+   asks for the right geometry at CreateWindowEx time.
+3. In `OnHandleCreated`, call
+   `SetWindowPos(handle, HWND_TOPMOST, X, Y, W, H, SWP_NOACTIVATE | SWP_FRAMECHANGED)`
+   as a belt-and-suspenders. Layered-window CreateWindowEx can subtly
+   drift the bounds on per-monitor-DPI systems even when CreateParams
+   asked for the right rect; SetWindowPos is the authoritative call.
+
+Verified: post-redeploy, daemon log shows
+`DISPLAY4 at {X=0,Y=0,Width=2560,Height=1440}` (raw pixels) and a
+DPI-aware query script reads back the same form rect. All four
+monitors now fully covered.
+
+### Bonus: hotkey arm/dismiss is now toggle
+
+Same v1.6 update: pressing Win+Shift+L (or Ctrl+Alt+Shift+L,
+Ctrl+Alt+Shift+B) when the overlay is up now dismisses it instead
+of re-arming. Pressing again arms. The dedicated unconditional
+dismiss (Ctrl+Alt+Shift+End) still works. Log lines are now
+`Hotkey: TOGGLE (...)`. This was a nicer UX given the v1.3 re-arm
+behavior tears down and re-creates forms on every press anyway -
+making it a true toggle is no more expensive and matches what users
+expect.
+
+## Files changed in v1.6
+
+- `BlackOverlay.ps1`:
+  - Added `SetWindowPos` PInvoke + `SWP_*` constants and
+    `HWND_TOPMOST`.
+  - Added `SetProcessDpiAwarenessContext` PInvoke +
+    `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
+  - `OverlayForm` now stores `_target` rect, sets it in
+    `CreateParams`, and re-applies it via `SetWindowPos` in
+    `OnHandleCreated` after the alpha call.
+  - New `Toggle-Overlays` function. Arm-style hotkey IDs (2, 3, 4)
+    now route to `Toggle-Overlays`. ID 1 still goes to
+    `Hide-Overlays` for the unconditional dismiss case.
+  - `SetProcessDpiAwarenessContext` call is invoked at module
+    startup, immediately after `Add-Type`, before any Form is
+    created.
+- `CHANGELOG.md` - v1.6 entry.
+- `ABOUT.md` - DPI awareness bullet added to "What was tried that
+  didn't work".
+- `README.md` - "Use" table updated to show toggle behavior.
+- Steering file at `~/.kiro/steering/windows-gpo-bypass.md` -
+  new section on per-monitor DPI awareness for processes that
+  paint full-screen overlays.

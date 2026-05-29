@@ -2,6 +2,36 @@
 
 # Changelog
 
+## v1.6 - 2026-05-29
+
+- **Fix: overlays only covered ~80% of each monitor on high-DPI laptops.**
+  After v1.4 made the layered windows opaque, the user reported the
+  overlay still left uncovered strips on the right and bottom of every
+  monitor. Root cause: the daemon process was DPI-unaware, so
+  `Screen.AllScreens` returned DPI-scaled bounds (e.g. 2048x1152 for a
+  2560x1440 monitor at 125%). The forms were being created at those
+  scaled bounds and painting at scaled physical pixels, leaving 512px
+  on the right and 288px on the bottom of every monitor uncovered.
+
+  Fix: call `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`
+  immediately after the type definitions load, before any Form is
+  created. This must be done before the first Form because the DPI
+  context is locked in at first window creation. Also added a belt
+  `SetWindowPos(handle, HWND_TOPMOST, X, Y, W, H, SWP_NOACTIVATE | SWP_FRAMECHANGED)`
+  in `OverlayForm.OnHandleCreated` so the layered-window CreateWindowEx
+  path cannot subtly drift the bounds.
+
+- **Hotkey behavior: arm/dismiss is now toggle.** Pressing Win+Shift+L,
+  Ctrl+Alt+Shift+L, or Ctrl+Alt+Shift+B while the overlay is up now
+  dismisses it; pressing again arms. Old behavior was always-arm
+  (Ctrl+Alt+Shift+End for dismiss only). Old dismiss hotkey still
+  works as a dedicated unconditional dismiss. Log lines are now
+  `Hotkey: TOGGLE (WIN+SHIFT+L)` etc.
+
+- Verified: 4 overlay forms at native rectangles (DISPLAY4 now
+  reports 2560x1440 not 2048x1152), `alpha=255 flags=0x2` on every
+  form, toggle ARM/DISMISS cycle is symmetric.
+
 ## v1.4 - 2026-05-29
 
 - **Fix: overlays were invisible (the actual visual bug).** The forms
