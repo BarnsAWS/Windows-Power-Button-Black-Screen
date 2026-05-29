@@ -2,6 +2,33 @@
 
 # Changelog
 
+## v1.3 - 2026-05-29
+
+- **Fix: hotkey re-arm did nothing after monitor topology change.**
+  Caused by `Show-Overlays` keying its "is this monitor already
+  covered" check off the previously-cached `Bounds`. After a dock
+  disconnect, undock, or display rearrangement, the cached overlays
+  were sitting at coordinates pointing nowhere and `Show-Overlays`
+  thought all current monitors were already covered, so it skipped
+  painting. The new `Show-Overlays` always tears down every existing
+  overlay and re-enumerates `Screen.AllScreens` on every arm event.
+  New log line `Re-arming overlays (re-enumerating displays).` makes
+  the behavior visible. Verified by the new `_test_rearm.ps1` test
+  injecting WM_HOTKEY id=3 twice in a row.
+- **Fix: USB devices dropping during Modern Standby cycles.** On
+  S0ix-capable laptops with a USB-C dock, USB selective suspend was
+  tearing down the dock's USB4/TB tunnel during connected-standby
+  entry, and the tunnel did not always re-enumerate cleanly on wake.
+  Installer now disables USB selective suspend on the active power
+  scheme (per-user-scheme, no admin needed). UNINSTALL.ps1 re-enables
+  it. The Modern Standby `Do nothing` power-button mapping shipped in
+  v1.2 already prevented power-button-driven S0ix entry; this v1.3
+  change covers the idle-driven case.
+- Verification block in `INSTALL.ps1` now reports the USB selective
+  suspend state alongside the lock-guard state.
+- New `-SkipUsbRestore` switch on `UNINSTALL.ps1` for the rare case
+  where USB suspend should stay disabled after uninstall.
+
 ## v1.2 - 2026-05-29
 
 - **Fix: GPO-enforced 15-minute secure screen saver still locked the

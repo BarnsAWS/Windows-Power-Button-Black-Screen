@@ -271,32 +271,33 @@ $script:Overlays = New-Object System.Collections.Generic.List[OverlayForm]
 $script:Armed    = $false
 
 function Show-Overlays {
-    if ($script:Armed) {
-        # Already up. Re-cover any monitor that came online (hot-plug).
-        foreach ($f in @($script:Overlays)) {
-            if ($f.IsDisposed) { $script:Overlays.Remove($f) | Out-Null }
-        }
-    } else {
+    # Always re-enumerate from scratch. Monitor coordinates can change at
+    # runtime (dock/undock, monitor hot-plug, display arrangement change,
+    # DPI rescale). A previously-painted overlay sitting at stale bounds
+    # is invisible (off-screen) and the cached "already covered" check
+    # would silently skip painting new ones. Cheaper and more correct to
+    # tear down and rebuild on every arm-style event.
+    foreach ($f in @($script:Overlays)) {
+        try { $f.Close(); $f.Dispose() } catch {}
+    }
+    $script:Overlays.Clear()
+
+    if (-not $script:Armed) {
         $script:Armed = $true
         Write-Log "Arming overlays."
         # Belt: re-suppress the screen saver right now in case the 60s
         # timer just ticked and a policy refresh re-armed the dispatch.
         [void](Suppress-ScreenSaver)
-    }
-
-    $current = @{}
-    foreach ($f in $script:Overlays) {
-        if (-not $f.IsDisposed) { $current[$f.Bounds.ToString()] = $true }
+    } else {
+        Write-Log "Re-arming overlays (re-enumerating displays)."
     }
 
     foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
         $b = $screen.Bounds
-        if (-not $current.ContainsKey($b.ToString())) {
-            $form = New-Object OverlayForm $b
-            $script:Overlays.Add($form)
-            $form.Show()
-            Write-Log ("Overlay shown on monitor {0} at {1}." -f $screen.DeviceName, $b)
-        }
+        $form = New-Object OverlayForm $b
+        $script:Overlays.Add($form)
+        $form.Show()
+        Write-Log ("Overlay shown on monitor {0} at {1}." -f $screen.DeviceName, $b)
     }
 }
 

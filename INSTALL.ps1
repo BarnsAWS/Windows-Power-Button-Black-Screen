@@ -159,6 +159,22 @@ if (-not $SkipLockGuard) {
             Set-ItemProperty -Path $winlogon -Name 'EnableGoodbye' -Value 0 -Force
         }
     }
+
+    # USB selective suspend keeps tripping connected USB devices on
+    # Modern Standby boxes when the daemon (or anything else) keeps the
+    # display off for an extended stretch. With ES_AWAYMODE_REQUIRED
+    # held, the system stays at S0 with the panel off, and USB selective
+    # suspend then becomes a per-device power-saving knob that the
+    # firmware applies asymmetrically: hub powers down, attached
+    # device disconnects, and the USB stack does not always recover
+    # cleanly when the user comes back. The cure is to disable USB
+    # selective suspend on the active scheme. This is per-user-scheme
+    # (no admin), idempotent, and reversible by UNINSTALL.ps1.
+    $SUB_USB        = '2a737441-1930-4402-8d77-b2bebba308a3'
+    $USB_SUSPEND    = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+    & powercfg /setacvalueindex SCHEME_CURRENT $SUB_USB $USB_SUSPEND 0 2>$null | Out-Null
+    & powercfg /setdcvalueindex SCHEME_CURRENT $SUB_USB $USB_SUSPEND 0 2>$null | Out-Null
+    & powercfg /setactive SCHEME_CURRENT | Out-Null
 } else {
     Write-Host "[3/5] Skipping lock-guard (-SkipLockGuard). Session may still auto-lock." -ForegroundColor DarkGray
 }
@@ -254,6 +270,14 @@ if (-not $SkipLockGuard) {
     Write-Host "  ScreenSaveActive:      $ssActive  (0 = no auto screen-saver)"
     Write-Host "  ScreenSaverIsSecure:   $ssSecure  (0 = wake does not require password)"
     Write-Host "  EnableGoodbye:         $(if ($null -eq $eg) { 'not set' } else { $eg })  (0 or unset = Dynamic Lock off)"
+
+    $SUB_USB     = '2a737441-1930-4402-8d77-b2bebba308a3'
+    $USB_SUSPEND = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+    $usbAc = (& powercfg /query SCHEME_CURRENT $SUB_USB $USB_SUSPEND 2>$null) | Select-String -Pattern 'Current AC Power Setting Index:\s*0x([0-9a-f]+)'
+    $usbDc = (& powercfg /query SCHEME_CURRENT $SUB_USB $USB_SUSPEND 2>$null) | Select-String -Pattern 'Current DC Power Setting Index:\s*0x([0-9a-f]+)'
+    if ($usbAc -and $usbDc) {
+        Write-Host "  USB selective suspend: AC=$($usbAc.Matches[0].Groups[1].Value), DC=$($usbDc.Matches[0].Groups[1].Value)  (0 = disabled, 1 = enabled)"
+    }
 }
 
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

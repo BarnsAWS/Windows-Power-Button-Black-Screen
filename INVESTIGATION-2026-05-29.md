@@ -173,6 +173,115 @@ considered for a future v1.3:
 Out of scope for v1.2. v1.2 ships with hotkey-only arming on Modern
 Standby and clear documentation about why.
 
+## Round 5: hotkey arm did nothing after dock topology change (v1.3)
+
+After v1.2 deployed, the user reported "win shift l does nothing".
+Diagnostic showed:
+
+- Daemon process alive, `BlackOverlayDaemon` task `Running`.
+- Hotkey was registering: log lines `Hotkey: WIN+SHIFT+L` appeared on
+  every press.
+- But no `Arming overlays.` or `Overlay shown on monitor` lines
+  followed: only the very first press painted, subsequent presses
+  were silent.
+- `EnumWindows` against the daemon PID showed 4 overlay forms still
+  alive and visible at coordinates from a previous monitor topology
+  (e.g. DISPLAY1 at `X=-1920,Y=1246`), but `Screen.AllScreens` now
+  reported a single monitor at `X=0,Y=0`. The forms were sitting on
+  no current monitor.
+
+Root cause in `Show-Overlays`: the function deduped against
+`Bounds.ToString()` of the cached overlays. After a dock disconnect,
+the cache held bounds that no longer matched any current monitor,
+but the dedupe table considered the visible (now-orphaned) forms as
+"already covering" some hypothetical screen. So when the daemon
+re-enumerated `Screen.AllScreens` and tried to find an uncovered
+monitor, it concluded all current monitors were "different from
+anything I know about" - but because the cache was non-empty, the
+stale forms still claimed to be the active overlays. Net effect: no
+new forms were created, the orphan forms stayed off-screen, and the
+user saw nothing.
+
+### Fix shipped in v1.3
+
+`Show-Overlays` now unconditionally tears down every existing overlay
+form and re-enumerates `Screen.AllScreens` on every arm event. The
+new log line `Re-arming overlays (re-enumerating displays).`
+distinguishes a re-arm from an initial arm. Cost is negligible: 4 form
+constructions on a 4-monitor rig is sub-millisecond.
+
+Verified by `_test_rearm.ps1` (deleted after run; reproduced from the
+v1.3 branch if needed): inject `WM_HOTKEY id=3` twice in a row, count
+overlay forms after each, then dismiss, re-arm, dismiss. All 6 sub-tests
+passed.
+
+## Round 6: USB-C dock dropping during Modern Standby (v1.3)
+
+While diagnosing the hotkey issue, the user said "seems like usb
+devices failed when that happened too". `_diag_dock.ps1` showed:
+
+- `Get-Forms.AllScreens` reported 1 monitor (the laptop panel).
+- `Get-PnpDevice -Class Monitor` showed 11 external-monitor PnP entries
+  with `Present=False` (cached EDIDs from past sessions).
+- `Get-PnpDevice -Class Display` showed `Dell Universal Hybrid Video
+  Dock` and `USB 4K Graphic Docking` with `Present=False`.
+- USB hubs and Thunderbolt routers labeled `Present=False`.
+- `Microsoft-Windows-Kernel-Power` event 105 ("Power source change")
+  fired at the same minute as the original power-button press.
+
+This is the documented Modern Standby + USB-C dock failure mode. When
+the firmware enters S0ix on power-button press, the USB selective-suspend
+policy tears down the USB4 tunnel that carries the dock's data and
+DisplayPort streams. On wake the tunnel sometimes does not re-enumerate
+cleanly without a physical unplug-replug.
+
+### Fix shipped in v1.3
+
+The v1.2 `Do nothing` power-button mapping already prevents
+power-button-driven S0ix entry on Modern Standby boxes. The remaining
+gap was idle-driven entry: even with the daemon holding
+`ES_AWAYMODE_REQUIRED`, USB selective suspend can still kick the dock
+during long idle stretches. The v1.3 installer disables USB selective
+suspend on the active power scheme:
+
+```
+SUB_USB        = '2a737441-1930-4402-8d77-b2bebba308a3'
+USB_SUSPEND    = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+powercfg /setacvalueindex SCHEME_CURRENT $SUB_USB $USB_SUSPEND 0
+powercfg /setdcvalueindex SCHEME_CURRENT $SUB_USB $USB_SUSPEND 0
+```
+
+Per-user-scheme, no admin, fully reversible by `UNINSTALL.ps1` (which
+restores the Windows default of `1`). Verification block surfaces the
+current state.
+
+The user's dock at the time of investigation was already disconnected
+(the symptom that prompted Round 6); the fix is preventive from the
+next session forward. To recover a wedged dock manually: physically
+unplug, wait 10 seconds, replug. `pnputil /restart-device` works
+against the USB4 router but requires admin.
+
+## Files changed in v1.3
+
+- `BlackOverlay.ps1`:
+  - Rewrote `Show-Overlays` to tear down all forms before
+    re-enumerating displays, so dock/undock events do not leave
+    orphan forms at stale coordinates. New log line
+    `Re-arming overlays (re-enumerating displays).` for re-arm path.
+- `INSTALL.ps1`:
+  - Added USB selective suspend disable in step 3 (the lock-guard
+    block). Verification block reports the AC and DC values.
+- `UNINSTALL.ps1`:
+  - Now 4 numbered steps. Step 4 re-enables USB selective suspend
+    to the Windows default of `1`. New `-SkipUsbRestore` switch.
+  - Doc-block updated.
+- `README.md` - new "USB-C dock and Modern Standby" subsection;
+  USB-suspend row added to the "What the script changes" table.
+- `ABOUT.md` - extended "What was tried that didn't work" with two
+  new bullets (cached `OverlayForm` instances; trusting USB selective
+  suspend on docks).
+- `CHANGELOG.md` - v1.3 entry.
+
 ## Files changed in v1.1
 
 - `INSTALL.ps1` - added step 3 lock-guard, `-SkipLockGuard` switch,

@@ -178,6 +178,14 @@ The installer probes for Modern Standby and on those machines maps the power but
 
 The reason this cannot be fixed at the daemon layer alone is that `SetThreadExecutionState(ES_AWAYMODE_REQUIRED)` only blocks *idle-driven* connected standby entry. Power-button-driven entry on Modern Standby goes through a different kernel path that does not consult execution-state flags. Disabling Connected Standby system-wide via `HKLM:\System\CurrentControlSet\Control\Power\CsEnabled = 0` would also fix it but requires admin and a reboot, which is out of scope for a per-user daemon.
 
+## USB-C dock and Modern Standby
+
+Modern Standby + USB-C dock is a notorious failure mode. When the system enters S0ix, the firmware's power broker tears down USB selective-suspend-eligible devices, which on Modern Standby boxes includes the USB4 / Thunderbolt tunnel that the dock rides over. On wake, the tunnel does not always re-enumerate cleanly: external displays stay dark, the dock's downstream USB hubs disappear, and `Get-PnpDevice -Class Monitor` shows the external monitors with `Present=False` until the user physically unplugs and replugs the cable.
+
+The installer disables USB selective suspend on the active power scheme as part of step 3 of the install. This is per-user-scheme, requires no admin, and is reversible by `UNINSTALL.ps1`. Combined with the v1.2 Modern Standby `Do nothing` power-button mapping (which prevents power-button-driven S0ix entry) and the v1.2 `ES_AWAYMODE_REQUIRED` keepalive (which prevents idle-driven S0ix entry while the daemon runs), the dock should stay enumerated continuously while the daemon is alive.
+
+If you ever do find your dock wedged after a Modern Standby cycle, the cleanest reset is to physically unplug the USB-C cable, wait 10 seconds, and plug it back in. `pnputil /restart-device` against the dock's USB4 router can also work but requires admin.
+
 ## Use
 
 | Action | How |
@@ -244,6 +252,7 @@ The deciding question is always **does the tool look at the screen, or does it t
 | Secure screen saver | `HKCU:\Control Panel\Desktop\ScreenSaverIsSecure` | `0` (cleared by lock-guard; skip with `-SkipLockGuard`) |
 | Auto screen saver | `HKCU:\Control Panel\Desktop\ScreenSaveActive` | `0` (cleared by lock-guard; skip with `-SkipLockGuard`) |
 | Dynamic Lock | `HKCU:\...\Winlogon\EnableGoodbye` | `0` if previously set (cleared by lock-guard) |
+| USB selective suspend | `powercfg SCHEME_CURRENT SUB_USB USBSELECTIVESUSPEND` | `0` on AC and DC (cleared by lock-guard) - prevents USB-C dock tunnels from being torn down during connected-standby cycles. Restored to `1` by `UNINSTALL.ps1`. |
 | Running-session screen saver | `SystemParametersInfo(SPI_SETSCREENSAVEACTIVE)` | Best-effort `FALSE` at startup and every 60s. Denied on GPO-locked boxes; the ES keepalive picks up the slack. |
 | Thread execution state | `SetThreadExecutionState` (held by daemon thread) | `ES_CONTINUOUS \| ES_DISPLAY_REQUIRED \| ES_SYSTEM_REQUIRED \| ES_AWAYMODE_REQUIRED`. This is the GPO bypass. |
 | Daemon script | `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.ps1` | Copied from the repo |
