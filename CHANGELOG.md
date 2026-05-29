@@ -2,6 +2,24 @@
 
 # Changelog
 
+## v1.4 - 2026-05-29
+
+- **Fix: overlays were invisible (the actual visual bug).** The forms
+  set `WS_EX_LAYERED` in their CreateParams but never called
+  `SetLayeredWindowAttributes`, so Windows treated them as fully
+  transparent. The forms were correctly created, sized, topmost, and
+  click-through, but the BackColor was never composited because layered
+  windows do not paint via the normal WinForms paint pipeline without
+  explicit alpha configuration. The user-visible symptom was the system
+  tray bell icon flickering on hotkey press (taskbar repaint as the
+  "invisible" overlay forms were created and shown), but the screen
+  staying entirely visible.
+
+  Fix: override `OnHandleCreated` on `OverlayForm` and call
+  `SetLayeredWindowAttributes(handle, 0, 255, LWA_ALPHA)` so the
+  window is opaque black. Verified with `GetLayeredWindowAttributes`:
+  all 4 overlay forms now report `alpha=255 flags=0x2`.
+
 ## v1.3 - 2026-05-29
 
 - **Fix: hotkey re-arm did nothing after monitor topology change.**

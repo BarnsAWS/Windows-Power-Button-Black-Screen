@@ -124,6 +124,12 @@ public static class Native {
     [DllImport("user32.dll")]
     public static extern bool UnregisterPowerSettingNotification(IntPtr Handle);
 
+    public const uint LWA_COLORKEY = 0x00000001;
+    public const uint LWA_ALPHA    = 0x00000002;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
@@ -257,6 +263,17 @@ public class OverlayForm : Form {
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
+
+    // WS_EX_LAYERED windows do not render their BackColor through the
+    // normal WinForms paint pipeline. Without an explicit alpha set via
+    // SetLayeredWindowAttributes, Windows treats the window as fully
+    // transparent and the BackColor is never composited - the user sees
+    // through to the desktop. Set alpha=255 (opaque) once the handle is
+    // ready so the black BackColor actually paints.
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        Native.SetLayeredWindowAttributes(this.Handle, 0, 255, Native.LWA_ALPHA);
+    }
 }
 '@
 

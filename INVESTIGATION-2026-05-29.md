@@ -261,7 +261,69 @@ next session forward. To recover a wedged dock manually: physically
 unplug, wait 10 seconds, replug. `pnputil /restart-device` works
 against the USB4 router but requires admin.
 
-## Files changed in v1.3
+## Round 7: overlays invisible despite being correctly created (v1.4)
+
+After v1.3 deployed, the user reported "win shift l does nothing" again.
+Diagnostic showed:
+
+- Daemon process alive and pumping.
+- Hotkey registering: `Hotkey: WIN+SHIFT+L` and `Re-arming overlays
+  (re-enumerating displays).` and 4 `Overlay shown on monitor` lines
+  per press.
+- `EnumWindows` confirmed 4 overlay forms alive, visible, topmost,
+  with the right ExStyle (`0x080900a8`).
+- Form rects exactly matched `Screen.AllScreens` for all 4 monitors.
+- The user's visual signal: pressing the hotkey caused the system tray
+  bell icon to flicker for half a second and reappear, but no black
+  overlays appeared.
+
+The bell-icon flicker was the smoking gun: it meant the taskbar was
+repainting because new topmost windows were being created and shown
+(taskbar always repaints when the topmost window list changes), but
+the windows themselves were not visually painting their content.
+
+Root cause: `OverlayForm.CreateParams` set `WS_EX_LAYERED` in the
+ExStyle, but the form never called `SetLayeredWindowAttributes` or
+`UpdateLayeredWindow`. Windows requires one of these calls on a
+layered window before it will composite anything; without them the
+window is treated as fully transparent regardless of the BackColor
+the form constructor set. The four forms were essentially invisible
+black holes covering the desktop without showing as black.
+
+This had been latent in the codebase since v1.0. It manifested only
+now because of the v1.3 `Show-Overlays` rewrite that tears down and
+re-creates forms on every arm event. The original v1.0 forms might
+have been painted through some side effect of the initial Show()
+order; once the rebuild path was live, every arm reliably produced
+invisible forms.
+
+### Fix shipped in v1.4
+
+Override `OnHandleCreated` on `OverlayForm` and call
+`SetLayeredWindowAttributes(handle, 0, 255, LWA_ALPHA)` immediately
+after the handle is created. Constants `LWA_ALPHA = 0x2` and the
+`SetLayeredWindowAttributes` PInvoke added to the `Native` class.
+
+Verified by reading back `GetLayeredWindowAttributes` against each
+overlay form's hWnd: all 4 forms report `alpha=255 flags=0x2` after
+arm. Daemon log shows the same `Re-arming overlays` and `Overlay
+shown on monitor` lines as before; what changed is only that the
+windows now actually paint.
+
+### Lesson for future
+
+Any time `WS_EX_LAYERED` is set in CreateParams or via
+`SetWindowLong`, the code owes the OS one of these before the
+window will paint anything:
+
+- `SetLayeredWindowAttributes(hwnd, key, alpha, flags)` for
+  per-window alpha or color-key layered painting (most uses).
+- `UpdateLayeredWindow(...)` for the more flexible per-pixel-alpha
+  layered painting (rarely needed; required if you want a layered
+  window with a BMP source).
+
+Without one of these, the WinForms paint pipeline silently does
+nothing useful. Documented in the steering file.
 
 - `BlackOverlay.ps1`:
   - Rewrote `Show-Overlays` to tear down all forms before
@@ -378,3 +440,19 @@ powercfg /a
 - Chose to map the power button to `Do nothing` on Modern Standby
   rather than fight the firmware. Hotkeys are reliable; pretending
   power button works on this hardware would be lying.
+
+
+## Files changed in v1.4
+
+- `BlackOverlay.ps1`:
+  - Added `LWA_COLORKEY`, `LWA_ALPHA` constants and the
+    `SetLayeredWindowAttributes` PInvoke to the `Native` class.
+  - Overrode `OnHandleCreated` on `OverlayForm` to call
+    `SetLayeredWindowAttributes(handle, 0, 255, LWA_ALPHA)`. Without
+    this, layered windows are invisible regardless of BackColor.
+- `CHANGELOG.md` - v1.4 entry.
+- `ABOUT.md` - new bullet in "What was tried that didn't work"
+  documenting the layered-attributes mistake.
+- Steering file at `~/.kiro/steering/windows-gpo-bypass.md` - new
+  section about `WS_EX_LAYERED` requiring layer-attributes
+  configuration to actually paint.
