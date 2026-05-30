@@ -3,8 +3,9 @@
     Install the Power-Button Black-Screen daemon. Pressing the laptop power
     button OR Win+Shift+L (or Ctrl+Alt+Shift+L) blanks every connected display
     under a topmost click-through black overlay, while leaving the user
-    session unlocked so automation tools (Amazon Quick CUA, Selenium, headed
-    Playwright, etc.) keep their grip on browser windows underneath.
+    session unlocked so automation tools (computer-use agents, Selenium,
+    headed Playwright, AutoHotkey) keep their grip on browser windows
+    underneath.
 
 .DESCRIPTION
     Performs four coordinated actions:
@@ -303,5 +304,6 @@ Write-Host "  - Press Ctrl+Alt+Shift+B.        Same (alternate, no Win/L modifie
 Write-Host "  - Move the mouse:                Screen wakes, overlay stays." -ForegroundColor Yellow
 Write-Host "  - Press Ctrl+Alt+Shift+End.      Dismiss." -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Session is NOT locked. CUA tools (Amazon Quick, Playwright, AHK)" -ForegroundColor Yellow
-Write-Host "can keep driving browser windows underneath the overlay." -ForegroundColor Yellow
+Write-Host "Session is NOT locked. Foreground automation tools (computer-use" -ForegroundColor Yellow
+Write-Host "agents, Playwright, Selenium, AutoHotkey) can keep driving browser" -ForegroundColor Yellow
+Write-Host "windows underneath the overlay." -ForegroundColor Yellow

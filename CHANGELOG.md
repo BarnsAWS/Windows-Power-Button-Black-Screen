@@ -142,7 +142,7 @@
   but reworked end-to-end: instead of the screen-saver-locks-the-session
   approach, this repo paints a topmost click-through black overlay on every
   monitor while leaving the user session unlocked, so foreground-driven
-  browser automation (Amazon Quick CUA, Playwright headed, AutoHotkey)
+  browser automation (Playwright headed, AutoHotkey, computer-use agents)
   can keep operating underneath.
 - Power button -> Turn off the display (AC + DC).
 - Per-user `BlackOverlayDaemon` Scheduled Task running at logon.

@@ -49,14 +49,14 @@ ScreenSaveTimeOut   : 180
     ScreenSaveTimeOut   = 900    <-- 15 minutes. Matches the observed lock timing.
 
 === Corporate endpoint agents ===
-CSFalconContainer (CrowdStrike)  -- multiple PIDs
-CSFalconService
+<corporate EDR / endpoint-protection processes>  -- multiple PIDs
+<corporate EDR service>
 ```
 
 The `\Software\Policies\` path is the GPO/MDM-managed copy of the same
 settings. Windows reads policy paths first and falls back to the user paths
 only when policy is absent. The corporate Intune / GPO machinery on this
-Amazon-managed laptop pushes `ScreenSaverIsSecure=1` with `ScreenSaveTimeOut=900`,
+managed laptop pushes `ScreenSaverIsSecure=1` with `ScreenSaveTimeOut=900`,
 re-applies it on every policy refresh (typically every 90 minutes plus
 random jitter), and there is nothing user-mode can do about that registry
 value durably.

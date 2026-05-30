@@ -1,14 +1,14 @@
-# About
+# About BlackoutOverlay
 
-The screen-blanking sibling of [Windows-Power-Button-Lock-Without-Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep). Same goal — press the power button, screen looks off, work keeps running. Different mechanism — a topmost click-through black overlay instead of an OS-level lock.
+The screen-blanking sibling of [Windows-Power-Button-Lock-Without-Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep). Same goal: press the power button, screen looks off, work keeps running. Different mechanism: a topmost click-through black overlay instead of an OS-level lock.
 
 ## Why does this exist?
 
-Long-running browser automation. Specifically: I run [Amazon Quick](https://github.com/BarnsAWS/Amazon-Quick) CUA jobs that take 30–90 minutes and need a real browser, real mouse cursor, real keystroke synthesis. They have to keep going while I'm not at the desk, and the screens have to *look* off so I'm not staring at four bright monitors from the next room.
+Long-running browser automation. Computer-use agents and other foreground-driver tools that run for 30 to 90 minutes need a real browser, real mouse cursor, real keystroke synthesis. They have to keep going while the user is not at the desk, and the screens have to *look* off — staring at four bright monitors from the next room is not ideal at 2am.
 
 The original "lock without sleep" repo gets the second half right but breaks the first half. A locked Windows session is a hostile environment for any automation that drives the foreground:
 
-- The desktop the agent was targeting is gone — replaced by the secure desktop / lock screen.
+- The desktop the agent was targeting is gone, replaced by the secure desktop / lock screen.
 - Synthesized input via `SendInput` and `mouse_event` no longer lands on the browser. Windows routes it to the secure desktop instead.
 - Browser windows are still alive (the renderer keeps composing) but no foreground-driver tool can reach them.
 
@@ -19,11 +19,12 @@ So: keep the desktop unlocked, paint over it with a curtain. The curtain is a re
 ## Design principles
 
 - **Idempotent.** Running INSTALL.ps1 twice is safe.
-- **Reversible.** UNINSTALL.ps1 puts the power button back, removes the daemon, deletes the install dir.
-- **Per-user.** No admin required. Power button settings on `SCHEME_CURRENT` and the Scheduled Task under the current user both work at user privilege.
-- **No third-party dependencies.** PowerShell 5.1, .NET Framework, PInvoke against `user32.dll`. Nothing to install, nothing to sign.
+- **Reversible.** UNINSTALL.ps1 puts the power button back, removes the daemon, deletes the install dir, restores USB selective suspend.
+- **Per-user.** No admin required. `powercfg` writes go to `SCHEME_CURRENT` for the current user. The Scheduled Task uses `RunLevel Limited`. The daemon writes to `%LOCALAPPDATA%`. Everything lives at user privilege.
+- **No third-party dependencies.** PowerShell 5.1, .NET Framework Forms, PInvoke against `user32.dll`, `kernel32.dll`. Nothing to install, nothing to sign.
 - **No telemetry.** Scripts make no network calls.
-- **Minimum surface.** One installer, one uninstaller, one daemon. The daemon does not draw a tray icon, does not write registry settings, does not write to a config file. Hotkeys are constants in the source. If you don't like them, edit the source.
+- **Minimum surface.** One installer, one uninstaller, one daemon. The daemon does not draw a tray icon, does not write registry settings, does not write to a config file. Hotkeys are constants in the source. If you do not like them, edit the source.
+- **GPO-aware.** Built and tested on a corporate-managed laptop with active Intune / GPO pushing a 15-minute secure screen saver. The daemon bypasses that without writing to any policy path.
 
 ## Why a click-through topmost window?
 
@@ -35,26 +36,31 @@ Three options for masking the desktop without locking it:
 
 Option 2 wins because it is small, fast, recovers cleanly, and does not interfere with any other process.
 
-## Why `GUID_CONSOLE_DISPLAY_STATE` and not a hotkey alone?
+## Why hotkeys (and `GUID_CONSOLE_DISPLAY_STATE` as a bonus)?
 
-The whole point of this trick is the muscle memory: tap the power button, screen blanks, walk away. The user does not want to remember a hotkey under normal use.
+The original idea was to lean on muscle memory: tap the power button, screen blanks, walk away. That works on legacy S3 hardware where `powercfg` mapping the button to "Turn off the display" reliably fires `GUID_CONSOLE_DISPLAY_STATE`. The daemon subscribes via `RegisterPowerSettingNotification` and arms the overlay synchronously in the WM_POWERBROADCAST handler.
 
-`GUID_CONSOLE_DISPLAY_STATE` is the right Windows event for "the display went off." It fires regardless of *why* the display went off:
+On Modern Standby (S0ix) hardware that path doesn't work. The firmware hands "Turn off the display" to the connected-standby kernel path, which parks every user-mode message pump including the daemon's. The overlay can't paint until the system wakes again. So on Modern Standby boxes the installer maps the power button to `Do nothing` and the *only* trigger is the hotkey. Since most modern laptops are Modern Standby, hotkeys are now the primary trigger and `GUID_CONSOLE_DISPLAY_STATE` is a bonus that still works on legacy hardware.
 
-- The user pressed the power button (with `powercfg` set to "Turn off the display").
-- The user closed the lid (if `lidclose` is mapped to "Turn off the display").
-- The screen saver fired and `ScreenSaveActive` triggered.
-- The display timed out via `monitor-timeout-*`.
+`GUID_CONSOLE_DISPLAY_STATE` is the right Windows event for "the display went off." When it does fire (on S3 hardware, lid close, monitor timeout, screen saver), the same daemon covers all those triggers without separate code paths.
 
-This means the same daemon covers all four of those triggers without separate code paths. The hotkey is for the override case where you want the overlay without touching the power button.
+The three hotkeys all toggle the overlay:
+
+- `Win+Shift+L` — closest to `Win+L` muscle memory, GPO-permitting
+- `Ctrl+Alt+Shift+L` — alternate when GPO disables Win-modifier hotkeys
+- `Ctrl+Alt+Shift+B` — alternate when L is bound to something else (e.g. an app's "lock" shortcut)
+
+`Ctrl+Alt+Shift+End` is a dedicated unconditional dismiss for when toggle behavior would be ambiguous.
 
 ## What was tried that didn't work
+
+This is the long version of the "things I learned the hard way" list. Each bullet is a real dead end that is now gone from the codebase but is documented here so the next person does not repeat the mistake.
 
 - **`SetSystemPowerState(SuspendAllowed=FALSE, MonitorOff=TRUE)` directly.** Works to turn the display off, but doesn't paint anything. You still need a separate trigger or overlay to mask the screen between display-off and display-wake events.
 - **A WPF window with `AllowsTransparency=True` and a Black brush.** Builds correctly. But WPF transparent windows on Windows trigger DWM software rendering paths, which interact poorly with `WS_EX_TRANSPARENT`. Mouse passthrough is unreliable on per-monitor DPI setups. Switched to WinForms, which uses raw GDI for the form and lets us push the click-through behavior cleanly through `WS_EX_TRANSPARENT`.
 - **A single huge window covering all four monitors as one virtual rect.** Cheaper to spawn but breaks taskbar / DWM behavior on monitors that have different DPI scales. One window per monitor is correct.
 - **Hooking `WM_SYSCOMMAND` with `SC_MONITORPOWER` instead of subscribing to `GUID_CONSOLE_DISPLAY_STATE`.** Works for screen-saver-driven blanks. Does NOT fire when `powercfg` blanks the display via the power button. The power-button path goes through the kernel power manager and surfaces as `GUID_CONSOLE_DISPLAY_STATE`, not as `WM_SYSCOMMAND`. Use the right event.
-- **Using a global keyboard hook to detect the power button.** The firmware consumes the power button event before any user-mode hook sees it on most laptops. Same root cause that defeated AutoHotkey in the lock repo's design notes. Always go through `powercfg` + display-state notification.
+- **Using a global keyboard hook to detect the power button.** The firmware consumes the power button event before any user-mode hook sees it on most laptops. Always go through `powercfg` + display-state notification.
 - **Clearing `HKCU:\Control Panel\Desktop\ScreenSaverIsSecure` to defeat the secure screen saver.** Works on unmanaged machines. Useless on Intune/GPO-managed boxes that re-apply `\Software\Policies\Microsoft\Windows\Control Panel\Desktop\ScreenSaverIsSecure=1` on every policy refresh. The fix is to operate at the running-session layer with `SetThreadExecutionState(ES_DISPLAY_REQUIRED)`, which Windows checks before activating the screen saver and which the policy engine cannot override. See README's [GPO bypass](README.md#gpo-bypass) section.
 - **Killing `scrnsave.scr` whenever it spawns.** Considered as a fallback for GPO-locked boxes. Rejected because (a) it races: the screen saver locks the session in the same SCM call that launches `.scr`, so by the time we see the process the lock is in flight, and (b) it is whack-a-mole if the policy specifies a different `.scr` (ribbons, mystify, third-party). `ES_DISPLAY_REQUIRED` short-circuits at the activation predicate, one level up.
 - **Mapping the power button to "Turn off the display" on Modern Standby (S0ix) hardware.** The firmware hands the action to the connected-standby path, parking every user-mode message pump including the daemon's. The overlay can't paint until the system wakes. Switched to mapping the power button to `Do nothing` on Modern Standby boxes and using the hotkey instead. Detection via `powercfg /a`.
@@ -71,9 +77,9 @@ Everything in this repo lives at user scope:
 - `powercfg /setacvalueindex SCHEME_CURRENT ...` writes to the user's active power scheme. Allowed at user privilege.
 - The Scheduled Task uses `New-ScheduledTaskPrincipal -RunLevel Limited`. Allowed without admin.
 - The daemon writes to `%LOCALAPPDATA%`. Allowed at user privilege.
-- `RegisterPowerSettingNotification` and `RegisterHotKey` are user-mode APIs. No elevation required.
+- `RegisterPowerSettingNotification`, `RegisterHotKey`, `SetThreadExecutionState`, `SetLayeredWindowAttributes`, `SetProcessDpiAwarenessContext` are all user-mode APIs. No elevation required.
 
-The only thing that *would* require admin is changing the **system-wide default power scheme**. We don't do that. Each user gets their own behavior.
+The only things that *would* require admin are changing the **system-wide default power scheme**, disabling Connected Standby (`HKLM:\System\CurrentControlSet\Control\Power\CsEnabled = 0`), or writing to `HKLM` policy paths. We do none of those. Each user gets their own behavior; the GPO bypass operates on the running session, not the registry.
 
 ## Why a Scheduled Task instead of `Run` registry key?
 
@@ -81,19 +87,26 @@ The only thing that *would* require admin is changing the **system-wide default 
 
 The task is also visible in `Get-ScheduledTask`, which is a much more discoverable place to look for "what is this thing doing on my machine" than three different `Run` keys scattered across HKCU and HKLM.
 
-## What if the user just wants the manual hotkey?
+## What if I do not want the installer to touch the power button at all?
 
 ```powershell
 .\INSTALL.ps1 -SkipPowerButton
 ```
 
-Daemon installs, `Ctrl+Alt+Shift+B` works, but the power button keeps doing whatever it was doing before. Useful if you have a different muscle-memory trigger or if your enterprise GPO is opinionated about power button mapping.
+Daemon installs, hotkeys work, but the power button keeps doing whatever it was doing before. Useful if you have a different muscle-memory trigger, an existing power-button mapping you want to preserve, or your enterprise GPO is opinionated about power button mapping.
+
+On Modern Standby (S0ix) hardware the default install already maps the power button to `Do nothing` because firmware-driven connected-standby would park the daemon. There is no power-button-driven arm path on those machines; hotkeys are the only trigger and the overlay paints synchronously in the daemon's message loop.
 
 ## Source References
 
 - INSTALL.ps1 / UNINSTALL.ps1 / BlackOverlay.ps1 in this repo.
+- INVESTIGATION-2026-05-29.md in this repo — full root-cause writeup of the v1.0 → v1.6 cycle.
 - [Microsoft Learn — `RegisterPowerSettingNotification`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerpowersettingnotification)
 - [Microsoft Learn — `WM_POWERBROADCAST`](https://learn.microsoft.com/en-us/windows/win32/power/wm-powerbroadcast)
 - [Microsoft Learn — Power-setting GUIDs](https://learn.microsoft.com/en-us/windows/win32/power/power-setting-guids)
 - [Microsoft Learn — `RegisterHotKey`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey)
 - [Microsoft Learn — Extended Window Styles](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles)
+- [Microsoft Learn — `SetThreadExecutionState`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate)
+- [Microsoft Learn — `SetLayeredWindowAttributes`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setlayeredwindowattributes)
+- [Microsoft Learn — `SetProcessDpiAwarenessContext`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext)
+- [Microsoft Learn — Modern Standby](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby)

@@ -1,24 +1,26 @@
-# Windows Power Button Black Screen (no lock, automation-friendly)
+# BlackoutOverlay
 
-Press the laptop power button to paint every connected monitor black under a topmost click-through overlay, while leaving the user session unlocked. Background work keeps running at full clock, and automation tools that drive a real browser (Amazon Quick CUA, Playwright headed mode, Selenium, AutoHotkey, UI Automation) keep working because nothing is locked and synthesized input still reaches the windows beneath the overlay.
+A Windows daemon that paints every connected monitor black under a topmost click-through overlay, while leaving the user session **unlocked**. Background work keeps running at full clock, and foreground-driven automation tools (Playwright, Selenium, AutoHotkey, UI Automation, computer-use agents) keep working because nothing is locked and synthesized input still reaches the windows beneath the overlay.
+
+Trigger with a hotkey (`Win+Shift+L` and friends — see [Use](#use) below). On laptops without Modern Standby the power button can also be wired to trigger the overlay; on Modern Standby laptops the power button is intentionally not used because the firmware would drop the system into connected standby and park the daemon. See [Modern Standby (S0ix) hardware](#modern-standby-s0ix-hardware) for details.
 
 This is the screen-blanking sibling of [Windows-Power-Button-Lock-Without-Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep). Use that one when you want a real lock; use this one when you need the screen to *look* off but the session must stay interactive for unattended automation.
 
 ## TL;DR
 
-| | This repo (Black Screen) | [Lock Without Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep) |
+| | This repo (BlackoutOverlay) | [Lock Without Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep) |
 |---|---|---|
-| Power button press | Paints every monitor black under topmost overlay | Turns off display, screen saver locks after idle |
+| Trigger | Hotkey (toggle), or power button on legacy S3 hardware | Power button |
 | Session locked? | No | Yes (after the idle timer) |
-| CUA / Playwright / Selenium can keep driving browsers? | Yes | No (locked sessions cannot receive synthesized input from foreground-style automation) |
+| Foreground automation can keep driving browsers? | Yes | No (locked sessions cannot receive synthesized input from foreground-style automation) |
 | Real S0 the whole time | Yes | Yes |
 | Privacy at the desk | Visual masking only | True OS-level lock |
 | Wake by mouse/keyboard? | Yes (display wakes, overlay stays up) | Yes (lock screen appears) |
-| Dismiss | Ctrl+Alt+Shift+End | Sign in |
+| Dismiss | Toggle hotkey, or `Ctrl+Alt+Shift+End` | Sign in |
 
 ## Why a black overlay instead of a lock?
 
-A locked Windows session aggressively rejects synthesized input that arrives at the desktop. Foreground-driven CUA tools (the kind that move the mouse with `SendInput` and click through the window manager) can no longer reach the browser because the desktop they were targeting is gone — replaced by the secure desktop / lock screen.
+A locked Windows session aggressively rejects synthesized input that arrives at the desktop. Foreground-driven automation tools (anything that moves the mouse with `SendInput` and clicks through the window manager) can no longer reach the browser because the desktop they were targeting is gone, replaced by the secure desktop / lock screen.
 
 For an unattended workflow that must keep automating a browser while the user is not at the desk, the lock is the wrong tool. The right tool is a visual mask over the unlocked desktop. Hence this repo.
 
@@ -29,6 +31,7 @@ The mask:
 - Click-through (`WS_EX_TRANSPARENT`) so synthesized mouse and keyboard input falls onto whatever is below.
 - Non-activating (`WS_EX_NOACTIVATE`) so it never steals focus from the browser the agent is driving.
 - Tool window (`WS_EX_TOOLWINDOW`) so it does not appear in Alt+Tab.
+- Per-monitor DPI aware so it covers the *physical* pixels of each display, not the DPI-virtualised bounds.
 
 Result: the screen looks off, the session is unlocked, and an agent that is already attached to the foreground browser keeps working uninterrupted.
 
@@ -38,48 +41,9 @@ This is **not a security boundary**. It is a privacy curtain.
 
 - Anyone who walks up can press `Ctrl+Alt+Shift+End` to dismiss the overlay and see the desktop. Pick a different shortcut in `BlackOverlay.ps1` if you need to be less obvious about it; `Win+L` will still lock the system the proper way.
 - The pixels are gone but the unlocked desktop is one taskbar click or one keyboard wake away.
-- Use the [lock-without-sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep) repo if your environment requires a real lock.
+- Use [Windows-Power-Button-Lock-Without-Sleep](https://github.com/BarnsAWS/Windows-Power-Button-Lock-Without-Sleep) if your environment requires a real lock.
 
 If your setup is "I leave my laptop running an automation overnight in a private office and want the room to look dark," this is the right tool. If your setup is "I leave my laptop in a public space," it is not.
-
-## Architecture
-
-Two pieces:
-
-1. **`powercfg`** rewrites the power button action to `Turn off the display` on AC and battery. The firmware blanks the panel; the OS fires a `WM_POWERBROADCAST` notification with `GUID_CONSOLE_DISPLAY_STATE` data byte `0`.
-2. **`BlackOverlay.ps1`** is a long-running per-user PowerShell daemon registered as a Scheduled Task that runs at logon. It:
-   - Builds a hidden message-only window via `NativeWindow`.
-   - Calls `RegisterPowerSettingNotification(GUID_CONSOLE_DISPLAY_STATE)` so the message window receives the display-state events.
-   - Calls `RegisterHotKey` for `Ctrl+Alt+Shift+End` (dismiss) and `Ctrl+Alt+Shift+B` (manual arm).
-   - On display-off, instantiates one `OverlayForm` per `Screen.AllScreens` entry, each fullscreen at the monitor's bounds, with extended styles `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`.
-   - Runs `Application.Run()` so the message pump dispatches the WM_POWERBROADCAST and WM_HOTKEY messages forever.
-
-```
-+-------------------------+        powercfg writes AC+DC button index = 4
-| User presses power btn  | -----> Firmware turns the panel off
-+-------------------------+              |
-                                         v
-                              GUID_CONSOLE_DISPLAY_STATE = 0
-                                         |
-                                         v
-+--------------------------------------------------+
-| BlackOverlay.ps1 message window                  |
-|   WndProc receives WM_POWERBROADCAST             |
-|   Walks Screen.AllScreens                        |
-|   Spawns one click-through OverlayForm per screen|
-+--------------------------------------------------+
-                                         |
-                                         v
-   +---------+ +---------+ +---------+ +---------+
-   | mon 1   | | mon 2   | | mon 3   | | mon 4   |
-   |  black  | |  black  | |  black  | |  black  |
-   +---------+ +---------+ +---------+ +---------+
-
-   (foreground browser windows still receive synthesized input
-    because every overlay is WS_EX_TRANSPARENT + WS_EX_NOACTIVATE)
-```
-
-No service, no kernel driver, no third-party dependency. Pure Windows PowerShell + .NET Framework Forms + a small PInvoke surface.
 
 ## Quick install
 
@@ -91,13 +55,15 @@ From a normal (non-elevated) PowerShell prompt in the cloned repo:
 
 What this does:
 
-1. Sets `Power button -> Turn off the display` on AC and battery (`powercfg`). On Modern Standby (S0ix) hardware the power button is instead set to `Do nothing` so the firmware does not drop the system into connected standby; on those machines, use a hotkey (see below).
-2. Disables the secure screen saver (`ScreenSaverIsSecure=0`, `ScreenSaveActive=0`) and Dynamic Lock (`EnableGoodbye=0`) so nothing auto-locks the session after the display turns off. See [Why the lock-guard?](#why-the-lock-guard) below.
+1. Probes `powercfg /a` for Modern Standby (S0ix) capability. On Modern Standby laptops, maps the power button to `Do nothing` so the firmware does not drop the system into connected standby (which would park the daemon). On legacy S3 hardware, maps the power button to `Turn off the display` so the daemon's display-state subscription can also arm the overlay automatically. Either way, hotkeys are the primary trigger.
+2. Disables the secure screen saver (`ScreenSaverIsSecure=0`, `ScreenSaveActive=0`), Dynamic Lock (`EnableGoodbye=0`), and USB selective suspend so nothing auto-locks the session and the dock does not get torn down. See [Why the lock-guard?](#why-the-lock-guard) below.
 3. Copies `BlackOverlay.ps1` to `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.ps1`.
 4. Registers a per-user Scheduled Task `BlackOverlayDaemon` that runs at logon under your user account with `-WindowStyle Hidden`.
 5. Starts the task immediately.
 
-The daemon also holds `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` for its entire lifetime. This is the GPO bypass: corporate-managed laptops push `ScreenSaverIsSecure=1` to the policy registry path, which user-mode cannot clear durably. But the screen-saver activation predicate Windows uses is *"any thread holding `ES_DISPLAY_REQUIRED`"*, and that operates on the running session, not the registry. The daemon holding the flag means the saver never fires regardless of policy. See [GPO bypass](#gpo-bypass) below for the full mechanism.
+The daemon also holds `SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` for its entire lifetime. This is the **GPO bypass**: corporate-managed laptops push `ScreenSaverIsSecure=1` to the policy registry path, which user-mode cannot clear durably. The screen-saver activation predicate Windows uses is *"any thread holding `ES_DISPLAY_REQUIRED`"*, and that operates on the running session, not the registry. The daemon holding the flag means the saver never fires regardless of policy. See [GPO bypass](#gpo-bypass) below for the full mechanism.
+
+The daemon is also per-monitor DPI aware (`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`). Without this, on a 2560x1440 display at 125% scaling, `Screen.AllScreens` would report 2048x1152 and the overlay would only cover the top-left ~64% of the physical display. With per-monitor DPI awareness, overlays cover full physical pixels on every monitor regardless of mixed scaling factors.
 
 To install the daemon without touching `powercfg`:
 
@@ -105,15 +71,15 @@ To install the daemon without touching `powercfg`:
 .\INSTALL.ps1 -SkipPowerButton
 ```
 
-Useful if you want the manual hotkey only and prefer not to repurpose the power button.
+Useful if you want only the hotkey path and prefer not to remap the power button at all.
 
-To install without disabling the secure screen saver / Dynamic Lock:
+To install without disabling the secure screen saver / Dynamic Lock / USB selective suspend:
 
 ```powershell
 .\INSTALL.ps1 -SkipLockGuard
 ```
 
-Use only if you intentionally want lock-on-idle to stay on. Default behaviour clears it because lock-on-idle defeats the whole point of this daemon (the session must stay unlocked).
+Use only if you intentionally want lock-on-idle to stay on, or you need USB selective suspend for battery life. Default behaviour clears them because lock-on-idle defeats the whole point of this daemon.
 
 ### Why the lock-guard?
 
@@ -123,7 +89,7 @@ If you previously installed the sibling repo [Windows-Power-Button-Lock-Without-
 - `HKCU:\Control Panel\Desktop\ScreenSaveActive = 1`
 - `HKCU:\Control Panel\Desktop\ScreenSaveTimeOut = 180` (or whatever you passed)
 
-That state survives uninstalls of *that* repo's `UNINSTALL.ps1` only partially — and even on a clean Windows install, an enterprise GPO can flip these on. With those values active and this repo's daemon running, the flow is:
+That state survives uninstalls of *that* repo's `UNINSTALL.ps1` only partially, and even on a clean Windows install an enterprise GPO can flip these on. With those values active and this repo's daemon running, the flow is:
 
 1. Power button pressed → display off → overlay armed (correct).
 2. 180 seconds later Windows counts the user as idle → secure screen saver fires → **session locks**.
@@ -132,7 +98,7 @@ The lock-guard step in step 2 of the installer clears those values up front so t
 
 ## GPO bypass
 
-On a corporate-managed laptop the v1.1 lock-guard is necessary but not sufficient. Intune / GPO pushes the same screen-saver values to a *different* registry path that the policy engine owns:
+On a corporate-managed laptop the lock-guard is necessary but not sufficient. Intune / GPO pushes the same screen-saver values to a *different* registry path that the policy engine owns:
 
 ```
 HKCU:\Software\Policies\Microsoft\Windows\Control Panel\Desktop\
@@ -151,7 +117,7 @@ The daemon holds:
 ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
 ```
 
-continuously for its entire lifetime. Released only when the daemon shuts down (the `finally` block of the message loop). The flags mean:
+continuously for its entire lifetime. Released only when the daemon shuts down. The flags mean:
 
 | Flag | Effect |
 |---|---|
@@ -182,7 +148,7 @@ The reason this cannot be fixed at the daemon layer alone is that `SetThreadExec
 
 Modern Standby + USB-C dock is a notorious failure mode. When the system enters S0ix, the firmware's power broker tears down USB selective-suspend-eligible devices, which on Modern Standby boxes includes the USB4 / Thunderbolt tunnel that the dock rides over. On wake, the tunnel does not always re-enumerate cleanly: external displays stay dark, the dock's downstream USB hubs disappear, and `Get-PnpDevice -Class Monitor` shows the external monitors with `Present=False` until the user physically unplugs and replugs the cable.
 
-The installer disables USB selective suspend on the active power scheme as part of step 3 of the install. This is per-user-scheme, requires no admin, and is reversible by `UNINSTALL.ps1`. Combined with the v1.2 Modern Standby `Do nothing` power-button mapping (which prevents power-button-driven S0ix entry) and the v1.2 `ES_AWAYMODE_REQUIRED` keepalive (which prevents idle-driven S0ix entry while the daemon runs), the dock should stay enumerated continuously while the daemon is alive.
+The installer disables USB selective suspend on the active power scheme as part of step 2 of the install. This is per-user-scheme, requires no admin, and is reversible by `UNINSTALL.ps1`. Combined with the Modern Standby `Do nothing` power-button mapping (which prevents power-button-driven S0ix entry) and the `ES_AWAYMODE_REQUIRED` keepalive (which prevents idle-driven S0ix entry while the daemon runs), the dock should stay enumerated continuously while the daemon is alive.
 
 If you ever do find your dock wedged after a Modern Standby cycle, the cleanest reset is to physically unplug the USB-C cable, wait 10 seconds, and plug it back in. `pnputil /restart-device` against the dock's USB4 router can also work but requires admin.
 
@@ -197,9 +163,9 @@ If you ever do find your dock wedged after a Modern Standby cycle, the cleanest 
 
 On Modern Standby (S0ix) laptops the power button is intentionally mapped to `Do nothing` (see [Modern Standby (S0ix) hardware](#modern-standby-s0ix-hardware) above), so use a hotkey to arm. The daemon paints the overlay before any firmware-blank request goes out, which is fully reliable.
 
-The daemon is stateful: the overlay stays armed across display-off / display-on cycles. Walking back to the desk, jiggling the mouse, looking at the keyboard — none of those dismiss it. Only the dismiss hotkey or `UNINSTALL.ps1` does.
+The daemon is stateful: the overlay stays armed across display-off / display-on cycles. Walking back to the desk, jiggling the mouse, looking at the keyboard — none of those dismiss it. Only the dismiss hotkey, a toggle hotkey while the overlay is up, or `UNINSTALL.ps1` does.
 
-If you hot-plug a new monitor while the overlay is armed, the daemon does not auto-cover it. Press `Ctrl+Alt+Shift+B` to refresh: the daemon walks `Screen.AllScreens` again and adds an overlay window for any monitor that is not already covered.
+If you hot-plug a new monitor, dock, or undock while the overlay is armed, press a toggle hotkey to refresh: the daemon walks `Screen.AllScreens` again and rebuilds the overlay set against the current monitor topology.
 
 ## Verification
 
@@ -218,13 +184,13 @@ Expected:
 
 - Power button index `0x00000004` on AC and DC (S3 laptops) or `0x00000000` (`Do nothing`, on Modern Standby laptops).
 - Scheduled task state `Running`.
-- The log shows `BlackOverlay starting`, then `Idle keepalive ON`, then a `Listening for power-broadcast and hotkeys` line.
+- The log shows `BlackOverlay starting`, then `Idle keepalive ON`, then `Listening for power-broadcast and hotkeys`.
 
 Smoke test:
 
-1. Open a browser, navigate somewhere, then press the power button.
+1. Open a browser, navigate somewhere, then arm the overlay (power button on S3 hardware, hotkey on Modern Standby).
 2. All monitors go black instantly.
-3. Run a CUA / AHK / Playwright script that targets the browser. It should still click and type without errors.
+3. Run a foreground-driver script (Playwright headed, AutoHotkey, etc.) that targets the browser. It should still click and type without errors.
 4. Press `Ctrl+Alt+Shift+End`. Overlay disappears, you see the browser exactly where the agent left it.
 
 ## Compatibility with automation tools
@@ -233,8 +199,8 @@ The overlay is `WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`, which means:
 
 | Tool | Works under the overlay? | Notes |
 |---|---|---|
-| **Amazon Quick CUA — DOM mode** | Yes | DOM injection ignores the OS window stack entirely. |
-| **Amazon Quick CUA — visual mode** | Partial | Mouse / keyboard land on the right window. **Screenshots see black.** Use DOM mode if the agent depends on screenshots. |
+| **DOM-based agents (CDP, headless / headed Playwright via DOM)** | Yes | DOM injection ignores the OS window stack entirely. |
+| **Visual / screenshot-based agents** | Partial | Mouse / keyboard land on the right window. **Screenshots see black.** Use a DOM mode if available. |
 | **Playwright (headed)** | Yes | Driven through CDP / WebSocket; the renderer keeps painting offscreen. |
 | **Selenium WebDriver** | Yes | Same as Playwright. |
 | **AutoHotkey `Send` / `Click`** | Yes | Keystrokes and clicks pass through. |
@@ -252,9 +218,10 @@ The deciding question is always **does the tool look at the screen, or does it t
 | Secure screen saver | `HKCU:\Control Panel\Desktop\ScreenSaverIsSecure` | `0` (cleared by lock-guard; skip with `-SkipLockGuard`) |
 | Auto screen saver | `HKCU:\Control Panel\Desktop\ScreenSaveActive` | `0` (cleared by lock-guard; skip with `-SkipLockGuard`) |
 | Dynamic Lock | `HKCU:\...\Winlogon\EnableGoodbye` | `0` if previously set (cleared by lock-guard) |
-| USB selective suspend | `powercfg SCHEME_CURRENT SUB_USB USBSELECTIVESUSPEND` | `0` on AC and DC (cleared by lock-guard) - prevents USB-C dock tunnels from being torn down during connected-standby cycles. Restored to `1` by `UNINSTALL.ps1`. |
+| USB selective suspend | `powercfg SCHEME_CURRENT SUB_USB USBSELECTIVESUSPEND` | `0` on AC and DC (cleared by lock-guard). Restored to `1` by `UNINSTALL.ps1`. |
 | Running-session screen saver | `SystemParametersInfo(SPI_SETSCREENSAVEACTIVE)` | Best-effort `FALSE` at startup and every 60s. Denied on GPO-locked boxes; the ES keepalive picks up the slack. |
 | Thread execution state | `SetThreadExecutionState` (held by daemon thread) | `ES_CONTINUOUS \| ES_DISPLAY_REQUIRED \| ES_SYSTEM_REQUIRED \| ES_AWAYMODE_REQUIRED`. This is the GPO bypass. |
+| Process DPI awareness | `SetProcessDpiAwarenessContext` | `PER_MONITOR_AWARE_V2` so overlays cover physical pixels not virtualised pixels. |
 | Daemon script | `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.ps1` | Copied from the repo |
 | Daemon log | `%LOCALAPPDATA%\BlackOverlay\BlackOverlay.log` | Created on first run, append-only |
 | Scheduled Task | `\BlackOverlayDaemon` (Task Scheduler library) | At-logon, current user, `-WindowStyle Hidden`, runs forever |
@@ -270,11 +237,12 @@ If you want the daemon **and** a long-tail real sleep on AC, run this repo's `IN
 ## Trade-offs and edge cases
 
 - **No real lock.** Anyone with physical access can dismiss the overlay or wake the screen and click around. See the threat-model section above.
-- **Hot-plug monitors do not auto-cover.** Press `Ctrl+Alt+Shift+B` to refresh. Continuous monitor enumeration on a 100 ms timer was rejected for battery reasons (laptop wake-from-sleep with a docked monitor is a common case).
+- **Dock / undock / monitor hot-plug.** The daemon does not watch for topology changes continuously (battery cost). Press a toggle hotkey to rebuild the overlay set against the current monitors. Fast and cheap.
 - **The daemon shows nothing in the system tray.** Intentional. If you want a tray icon, replace the `MessageWindow` with a `NotifyIcon`. The daemon is otherwise stateless and the design favors zero footprint.
 - **Hotkey collisions.** `Ctrl+Alt+Shift+End` and `Ctrl+Alt+Shift+B` are unusual enough that no shipping software the author has run binds them, but this is not guaranteed. If a binding fails, the daemon logs the failure and keeps running. Override by editing `BlackOverlay.ps1` and changing the `VK_*` constants.
-- **Multiple monitors with HDR.** The overlay form fills `Screen.Bounds`, which is in DIPs. On scaled displays the result is correctly sized. HDR overlays render as standard sRGB black; that is fine for visual masking.
-- **High-DPI taskbar peek.** Some Win11 builds occasionally show a 1 px taskbar artifact on the primary monitor when a topmost layered window is created. The daemon's `WS_EX_TOOLWINDOW` style suppresses this in testing on Win11 23H2 and 24H2, but the artifact has been seen briefly on 22H2 with display drivers older than 31.x.
+- **Multiple monitors with HDR.** The overlay form fills `Screen.Bounds` (in physical pixels via per-monitor DPI awareness). HDR overlays render as standard sRGB black; that is fine for visual masking.
+- **Modern Standby (S0ix).** Power button is mapped to `Do nothing` to keep the daemon alive. Use a hotkey instead. See the dedicated section above.
+- **USB-C docks on Modern Standby.** USB selective suspend is disabled at install time so the dock's USB4 / Thunderbolt tunnel does not get torn down. See the dedicated section above.
 
 ## Uninstall
 
@@ -288,8 +256,9 @@ What this does:
 - Kills any orphan `powershell.exe` processes still running `BlackOverlay.ps1`.
 - Deletes `%LOCALAPPDATA%\BlackOverlay` (pass `-KeepLogs` to keep the log).
 - Restores the power button to `Sleep` on AC and DC.
+- Re-enables USB selective suspend on the active power scheme (Windows default).
 
-The "Turn off the display" option remains unhidden in Control Panel (harmless).
+The "Turn off the display" option remains unhidden in Control Panel (harmless). The lock-guard registry values stay cleared (harmless on its own; if you want lock-on-idle back, set them in `Settings -> Personalization -> Lock screen`).
 
 ## Files
 
@@ -298,6 +267,7 @@ The "Turn off the display" option remains unhidden in Control Panel (harmless).
 - `BlackOverlay.ps1` — long-running per-user daemon. The interesting code lives here.
 - `ABOUT.md` — design notes, what was tried that did not work, why each decision was made.
 - `CHANGELOG.md` — version history.
+- `INVESTIGATION-2026-05-29.md` — full root-cause analysis from the v1.1 → v1.6 cycle. Useful reading for anyone hitting the same GPO / Modern Standby / DPI traps.
 
 ## License
 
@@ -310,4 +280,8 @@ MIT. See [LICENSE](LICENSE).
 - [Microsoft Learn — `WM_POWERBROADCAST`](https://learn.microsoft.com/en-us/windows/win32/power/wm-powerbroadcast)
 - [Microsoft Learn — `GUID_CONSOLE_DISPLAY_STATE`](https://learn.microsoft.com/en-us/windows/win32/power/power-setting-guids)
 - [Microsoft Learn — Extended Window Styles (`WS_EX_TRANSPARENT`, `WS_EX_LAYERED`, `WS_EX_NOACTIVATE`)](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles)
+- [Microsoft Learn — `SetThreadExecutionState`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate)
+- [Microsoft Learn — `SetLayeredWindowAttributes`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setlayeredwindowattributes)
+- [Microsoft Learn — `SetProcessDpiAwarenessContext`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext)
 - [Microsoft Learn — `RegisterHotKey`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey)
+- [Microsoft Learn — Modern Standby (S0 Low Power Idle)](https://learn.microsoft.com/en-us/windows-hardware/design/device-experiences/modern-standby)

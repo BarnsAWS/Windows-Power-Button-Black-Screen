@@ -4,8 +4,8 @@
     laptop power button is pressed and powercfg routes that to "Turn off the
     display"), or when the user presses the arm hotkey, paints a topmost
     click-through black window on every monitor so the desktop reads as fully
-    blank. Does NOT lock the session, so unattended automation (Amazon Quick
-    CUA, etc.) can keep driving browser windows underneath.
+    blank. Does NOT lock the session, so unattended automation (computer-use
+    agents, Playwright, AutoHotkey) can keep driving browser windows underneath.
 
 .DESCRIPTION
     Runs in the user's logon session. Builds a hidden message window to
